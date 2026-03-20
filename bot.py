@@ -648,7 +648,7 @@ class MadnessBot(Client):
         # Only market-make once at least one game is live (avoid getting picked off pre-game)
         has_any_live = bool(getattr(self, 'live_games_map', {}))
         if not is_late_game and has_any_live:
-            await self._post_limit_orders(symbol, book, state, position, skewed_fv)
+            await self._post_limit_orders(symbol, book, state, position)
 
     async def _post_limit_orders(
         self, symbol: str, book: OrderBook, state: SymbolState, position: int,
@@ -657,9 +657,14 @@ class MadnessBot(Client):
         """
         Post limit orders around fair value to provide liquidity and earn spread.
         Only posts if there's a gap in the book we can fill profitably.
-        Uses inventory-skewed fair value when available.
+
+        IMPORTANT: Uses RAW fair value for price placement, not skewed FV.
+        Skewed FV caused limit orders to post at absurd prices (e.g., ask at 3.5
+        when FV=5.0 and position=+61), instantly getting filled and driving the
+        position from +61 to -80 before A-S could rein it in. Limit order qty
+        is also capped to prevent flipping position direction.
         """
-        fv = skewed_fv if skewed_fv is not None else state.fair_value
+        fv = state.fair_value  # Always use raw FV for limit order placement
         if fv < MIN_PRICE or fv > MAX_PRICE:
             return
 
@@ -685,6 +690,10 @@ class MadnessBot(Client):
                 bid_px = min(bid_px, book.best_bid_px + 0.1)
             if bid_px >= MIN_PRICE and bid_px < fv:
                 bid_qty = min(3, MAX_POSITION - position)
+                # Cap bid qty: if long, allow up to 3; if short, allow covering
+                # but never let limit orders flip us from short to long beyond +3
+                if position < 0:
+                    bid_qty = min(bid_qty, -position)  # only cover up to flat
                 if getattr(self, "risk_reducing_only", False):
                     if position >= 0:
                         bid_qty = 0
@@ -704,6 +713,10 @@ class MadnessBot(Client):
                 ask_px = max(ask_px, book.best_ask_px - 0.1)
             if ask_px <= MAX_PRICE and ask_px > fv:
                 ask_qty = min(3, MAX_POSITION + position)
+                # Cap ask qty: if short, allow up to 3; if long, allow reducing
+                # but never let limit orders flip us from long to short beyond -3
+                if position > 0:
+                    ask_qty = min(ask_qty, position)  # only reduce to flat
                 if getattr(self, "risk_reducing_only", False):
                     if position <= 0:
                         ask_qty = 0
