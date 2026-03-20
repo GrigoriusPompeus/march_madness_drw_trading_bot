@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.drw.com)",
+      "WebFetch(domain:www.ncaa.com)",
+      "WebFetch(domain:site.api.espn.com)",
+      "WebFetch(domain:kenpom.com)",
+      "WebFetch(domain:masseyratings.com)",
+      "WebFetch(domain:barttorvik.com)",
+      "WebFetch(domain:www.warrennolan.com)",
+      "WebSearch",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:sports.betmgm.com)",
+      "WebFetch(domain:cleatz.com)",
+      "WebFetch(domain:www.espn.com)",
+      "WebFetch(domain:www.cbssports.com)",
+      "WebFetch(domain:www.foxsports.com)",
+      "WebFetch(domain:sports.yahoo.com)",
+      "Bash(python model.py)",
+      "Bash(python bot.py)",
+      "Bash(python -c \":*)",
+      "WebFetch(domain:www.masseyratings.com)",
+      "WebFetch(domain:www.sofascore.com)",
+      "WebFetch(domain:www.sports-reference.com)"
+    ]
+  }
+}
