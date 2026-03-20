@@ -626,10 +626,14 @@ def update_symbol_mapping(exchange_symbols: List[str]) -> None:
                 SYMBOL_TO_TEAM[symbol] = team
                 break
         else:
-            # Try partial match
-            for team in all_teams:
-                team_parts = team.lower().split()
-                if any(part in sym_lower for part in team_parts if len(part) > 3):
+            # Try partial match - sort by length descending so "Michigan State"
+            # is checked before "Michigan" (prevents substring false matches)
+            for team in sorted(all_teams, key=len, reverse=True):
+                team_lower = team.lower()
+                # Require the team name to appear as a whole word boundary match
+                # in the symbol, not just a substring
+                import re
+                if re.search(r'\b' + re.escape(team_lower) + r'\b', sym_lower):
                     if team not in TEAM_TO_SYMBOL:
                         TEAM_TO_SYMBOL[team] = symbol
                         SYMBOL_TO_TEAM[symbol] = team

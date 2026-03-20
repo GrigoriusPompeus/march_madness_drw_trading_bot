@@ -212,15 +212,17 @@ def espn_to_model_name(espn_name: str) -> Optional[str]:
     if espn_name in ESPN_TO_MODEL:
         return ESPN_TO_MODEL[espn_name]
 
-    # Partial match
-    for espn, model in ESPN_TO_MODEL.items():
+    # Partial match - check longer dict keys first to avoid substring collisions
+    for espn, model in sorted(ESPN_TO_MODEL.items(), key=lambda x: len(x[0]), reverse=True):
         if espn_name in espn or espn in espn_name:
             return model
 
-    # Try just the school name (first word or last word)
+    # Try matching against model names - sort by length descending so
+    # "Michigan State" is checked before "Michigan", etc.
+    import re
     from model import TEAM_RATINGS
-    for team in TEAM_RATINGS:
-        if team.lower() in espn_name.lower():
+    for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
+        if re.search(r'\b' + re.escape(team.lower()) + r'\b', espn_name.lower()):
             return team
 
     log.warning(f"Could not map ESPN name: {espn_name}")

@@ -180,16 +180,18 @@ def resolve_team_name(api_name: str) -> Optional[str]:
     # Exact match
     if api_name in ODDS_API_TO_MODEL:
         return ODDS_API_TO_MODEL[api_name]
-    # Partial match (API may use short names)
-    for api, model in ODDS_API_TO_MODEL.items():
+    # Partial match - check longer dict keys first to avoid substring collisions
+    for api, model in sorted(ODDS_API_TO_MODEL.items(), key=lambda x: len(x[0]), reverse=True):
         if api_name in api or api in api_name:
             return model
-    # Try matching against model names directly
+    # Try matching against model names directly - sort by length descending so
+    # "Michigan State" is checked before "Michigan", etc.
+    import re
     from model import TEAM_RATINGS
-    for team in TEAM_RATINGS:
+    for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
         if team.lower() == api_name.lower():
             return team
-        if team.lower() in api_name.lower():
+        if re.search(r'\b' + re.escape(team.lower()) + r'\b', api_name.lower()):
             return team
     return None
 
@@ -491,9 +493,10 @@ class KalshiClient:
 
             # Try to extract team name from title
             # Titles like "Will Duke win the NCAA Tournament?" or "Duke to reach Final Four"
+            import re
             from model import TEAM_RATINGS
-            for team in TEAM_RATINGS:
-                if team.lower() in title.lower():
+            for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
+                if re.search(r'\b' + re.escape(team.lower()) + r'\b', title.lower()):
                     if team not in self.team_markets:
                         self.team_markets[team] = []
                     self.team_markets[team].append(ticker)
@@ -501,16 +504,17 @@ class KalshiClient:
                     # Use mid price as probability, fall back to last_price
                     prob = None
                     if yes_bid is not None and yes_ask is not None:
-                        prob = (yes_bid + yes_ask) / 200.0  # cents to dollars to prob
+                        # Fields are *_dollars (0.00-1.00 range), mid = probability
+                        prob = (yes_bid + yes_ask) / 2.0
                     elif last_price is not None:
-                        prob = last_price / 100.0
+                        prob = last_price  # already in dollars = probability
 
                     if prob is not None:
                         self.market_prices[ticker] = prob
 
                         # Categorize by round
                         title_lower = title.lower()
-                        if "champion" in title_lower or "win" in title_lower and "tournament" in title_lower:
+                        if "champion" in title_lower or ("win" in title_lower and "tournament" in title_lower):
                             if team not in self.advancement_probs:
                                 self.advancement_probs[team] = {}
                             self.advancement_probs[team]["champion"] = prob
@@ -606,14 +610,23 @@ class KalshiClient:
                         if old is not None and abs(prob - old) > 0.02:
                             log.info(f"Kalshi WS: {ticker} {old:.1%} -> {prob:.1%}")
 
-                        # Update advancement probs
-                        for team, tickers in self.team_markets.items():
-                            if ticker in tickers:
-                                # Re-categorize (simplified - just update the price)
+                        # Update advancement probs - only update the specific
+                        # round that this ticker corresponds to (not all rounds)
+                        for team, team_tickers in self.team_markets.items():
+                            if ticker in team_tickers:
                                 if team in self.advancement_probs:
-                                    for round_key in self.advancement_probs[team]:
-                                        # Update if this is the right ticker
-                                        self.advancement_probs[team][round_key] = prob
+                                    # Find which round this ticker maps to by
+                                    # checking the ticker name for round keywords
+                                    ticker_lower = ticker.lower()
+                                    if "champion" in ticker_lower or "winner" in ticker_lower:
+                                        if "champion" in self.advancement_probs[team]:
+                                            self.advancement_probs[team]["champion"] = prob
+                                    elif "final" in ticker_lower or "f4" in ticker_lower:
+                                        if "final_four" in self.advancement_probs[team]:
+                                            self.advancement_probs[team]["final_four"] = prob
+                                    elif "elite" in ticker_lower or "e8" in ticker_lower:
+                                        if "elite_eight" in self.advancement_probs[team]:
+                                            self.advancement_probs[team]["elite_eight"] = prob
                                 break
 
         except Exception as e:

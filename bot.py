@@ -69,7 +69,7 @@ ORDER_COOLDOWN = 5.0        # Min seconds between orders on same symbol
 
 # Avellaneda-Stoikov / wash trade parameters
 RISK_AVERSION_GAMMA = 0.05    # Avellaneda-Stoikov inventory penalty
-WASH_TRADE_SPREAD = 0.05      # Spread threshold for wash trade detection
+WASH_TRADE_SPREAD = 0.5       # Spread threshold for wash trade detection
 WASH_TRADE_FV_DIST = 2.0      # Min FV distance to flag wash trading
 
 # Monte Carlo settings
@@ -164,6 +164,9 @@ class MadnessBot(Client):
         self.last_market_data_log: float = 0.0
         self.espn_consecutive_fails: int = 0   # Consecutive ESPN API failures
         self.api_paused: bool = False           # Trading paused due to API failure
+        self.live_games_map: Dict = {}          # team -> live game info
+        self.data_stale: bool = False           # Whether ESPN data is stale
+        self.risk_reducing_only: bool = False   # PnL floor failsafe flag
 
     async def on_start(self) -> None:
         """Initialize and start the trading loop."""
@@ -310,11 +313,13 @@ class MadnessBot(Client):
                 self.matched_symbols[symbol] = team
                 continue
 
-            # Fuzzy fallback
-            for team in TEAM_RATINGS:
-                team_words = team.lower().split()
-                sym_lower = symbol.lower()
-                if any(w in sym_lower for w in team_words if len(w) > 3):
+            # Fuzzy fallback - sort by length descending so "Michigan State"
+            # is checked before "Michigan" (prevents substring false matches)
+            import re
+            sym_lower = symbol.lower()
+            for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
+                team_lower = team.lower()
+                if re.search(r'\b' + re.escape(team_lower) + r'\b', sym_lower):
                     if team not in TEAM_TO_SYMBOL:
                         TEAM_TO_SYMBOL[team] = symbol
                         SYMBOL_TO_TEAM[symbol] = team
@@ -549,8 +554,8 @@ class MadnessBot(Client):
         # Environmental Firewall: Reduce-Only in final 4 minutes
         is_late_game = (0 < time_rem < 240)
 
-        # Spread constraint: 3 units
-        if spread > 3.0 and best_bid > 0 and best_ask < 64:
+        # Spread constraint
+        if spread > SPREAD_LIMIT and best_bid > 0 and best_ask < 64:
             return
 
         # Current position in this symbol
@@ -592,8 +597,8 @@ class MadnessBot(Client):
             if buy_edge > effective_req and hard_min_px <= ask <= hard_max_px:
                 # If late game, only buy if we are short (reducing risk). Don't open/add longs.
                 if not (is_late_game and position >= 0):
-                    # Compute Kelly-optimal size
-                    qty = self._compute_order_qty(fair_value, ask, position, side="buy")
+                    # Compute Kelly-optimal size (use skewed FV for consistency with edge calc)
+                    qty = self._compute_order_qty(skewed_fv, ask, position, side="buy")
                     if qty > 0:
                         try:
                             order = await self.send_order(symbol, ask, qty, "LIMIT")
@@ -624,7 +629,7 @@ class MadnessBot(Client):
             if sell_edge > effective_req and hard_min_px <= bid <= hard_max_px:
                 # If late game, only sell if we are long (reducing risk). Don't open new shorts.
                 if not (is_late_game and position <= 0):
-                    qty = self._compute_order_qty(fair_value, bid, position, side="sell")
+                    qty = self._compute_order_qty(skewed_fv, bid, position, side="sell")
                     if qty > 0:
                         try:
                             order = await self.send_order(symbol, bid, -qty, "LIMIT")

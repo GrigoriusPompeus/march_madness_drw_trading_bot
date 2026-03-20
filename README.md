@@ -69,12 +69,12 @@ qty = kelly_fraction * 0.15 * 500    # capped at 10 per order
 |---------|-------|---------|
 | Max position | 80 contracts/team | Buffer below exchange limit of 100 |
 | Price boundaries | 6.4 - 57.6 | Only trade in 10%-90% probability range |
-| Spread limit | 3.0 points | Don't trade illiquid markets (edge lost to spread) |
+| Spread limit | 4.0 points | Don't trade illiquid markets (edge lost to spread) |
 | Order cooldown | 5 seconds/symbol | Prevent rapid-fire on same contract |
 | PnL floor | -$500,000 | Risk-reducing only mode if breached |
 | Late-game firewall | Final 4 minutes | Only risk-reducing trades (no new positions) |
 | Max order size | 10 contracts | Split large orders to reduce market impact |
-| Wash trade detection | Spread <= 0.05, mid far from FV | Skip toxic fake liquidity |
+| Wash trade detection | Spread <= 0.5, mid far from FV | Skip toxic fake liquidity |
 | API failsafe | 3 consecutive ESPN failures | Pause ALL trading until data recovers |
 
 ### Step 6: Market Making
@@ -167,9 +167,37 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 
 ---
 
-## Day 1 Results (March 19, 2026 — Pre-Tournament)
+## Known Issues Fixed (v2 — March 20, 2026)
 
+**Team name mapping bugs** — Fuzzy/substring fallbacks in all API integrations (ESPN, Odds API, Kalshi, exchange symbol matching) could map "Michigan State" to "Michigan" (and similar pairs: Iowa/Iowa State, Texas/Texas Tech, Tennessee/Tennessee State). All 7 fallback locations now use word-boundary regex matching with longest-name-first ordering.
+
+**Edge/Kelly sizing mismatch** — Trade entry used inventory-skewed FV for edge calculation but Kelly sizing used raw FV, causing position sizes inconsistent with the edge that triggered the trade. Now both use skewed FV.
+
+**Kalshi REST price interpretation** — REST fields ending in `_dollars` are 0.00–1.00 range, not cents. Were being divided by 100x, making Kalshi data nearly invisible in fair value blending.
+
+**Kalshi WS round overwrite** — A price update for one ticker (e.g., championship) was overwriting all advancement round probabilities for that team. Now only updates the matching round.
+
+**Operator precedence** — `"champion" or "win" and "tournament"` parsed incorrectly due to `and` binding tighter than `or`. Added explicit parentheses.
+
+**Spread limit constant** — Hardcoded `3.0` instead of using the `SPREAD_LIMIT = 4.0` config constant.
+
+**Wash trade threshold** — Was `0.05` on a 0–64 price scale (impossible to trigger). Changed to `0.5`.
+
+**Uninitialized attributes** — `live_games_map`, `data_stale`, `risk_reducing_only` relied on `getattr` fallbacks instead of proper `__init__` initialization.
+
+---
+
+## Results
+
+### Day 1 (March 19 — Pre-Tournament)
 - 459 trades, 955 contracts traded, +$2,673 MTM P&L
 - Long: Duke (+30), Arizona (+36), Michigan (+41), Florida (+48)
 - Short: 24 teams including Nebraska (-80), Connecticut (-80), UCLA (-71)
 - Key insight: Market systematically overprices mid/low-tier teams vs our model — only 4 teams underpriced
+
+### Day 1–2 Cumulative (March 19–20)
+- 1,395 trades, 2,939 contracts traded
+- Cash: $3,940.73 | P&L: $2,134.78
+- Top winner: Michigan (+$916 realized, ~$1,000 unrealized) — bought heavily at $6.75–7.55 vs model FV of $21+
+- Other winners: Iowa State (+$385), Nebraska (+$130), Purdue (+$100), Houston (+$85)
+- Avg edge per contract: $2.39 | Trades per hour: 38
