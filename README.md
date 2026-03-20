@@ -167,6 +167,10 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 
 ---
 
+## Known Issues Fixed (v5 — March 20, 2026)
+
+**Limit orders using skewed FV caused position blowthrough** — Market-making limit orders used A-S inventory-skewed fair value for price placement. When long +61 Michigan State (FV=5.0), skewed FV dropped to 2.0, posting asks at 3.5 — instantly filled by other participants. This drove the position from +61 to -65 in minutes, then A-S skew forced expensive buybacks at 6.7–7.1 (above raw FV of 6.0), resulting in negative-edge trades. Fixed by: (1) limit orders now use raw FV for price placement, and (2) limit order qty is capped to prevent flipping position direction — if long, asks only reduce to flat; if short, bids only cover to flat.
+
 ## Known Issues Fixed (v4 — March 20, 2026)
 
 **Missing ESPN name variants** — ESPN_TO_MODEL was missing `"California Baptist Lancers"` and `"Miami OH RedHawks"` alternate name formats. If ESPN returned either variant, the team would fail to resolve, causing eliminated teams to remain "alive" in the model or live scores to be silently dropped.
