@@ -15,8 +15,41 @@ from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
+# External odds overrides (populated at runtime by odds_api.OddsManager)
+# ---------------------------------------------------------------------------
+
+# Matchup probability overrides from bookmakers: (teamA, teamB) -> P(A wins)
+# When populated, win_probability() uses these instead of rating-based logistic model
+MATCHUP_OVERRIDES: Dict[tuple, float] = {}
+
+# Market-calibrated ratings: team -> adjusted AdjEM
+# When populated, used instead of TEAM_RATINGS for future-round matchups
+ADJUSTED_RATINGS: Dict[str, float] = {}
+
+
+def set_matchup_overrides(overrides: Dict[tuple, float]) -> None:
+    """Update matchup probability overrides from external odds data."""
+    global MATCHUP_OVERRIDES
+    MATCHUP_OVERRIDES = overrides
+
+
+def set_adjusted_ratings(ratings: Dict[str, float]) -> None:
+    """Update market-calibrated team ratings."""
+    global ADJUSTED_RATINGS
+    ADJUSTED_RATINGS = ratings
+
+
+def get_effective_rating(team: str) -> float:
+    """Get the best available rating for a team (market-adjusted if available)."""
+    if ADJUSTED_RATINGS and team in ADJUSTED_RATINGS:
+        return ADJUSTED_RATINGS[team]
+    return TEAM_RATINGS.get(team, 0.0)
+
+
+# ---------------------------------------------------------------------------
 # Team ratings (KenPom AdjEM estimates for 2025-26 season)
 # Derived from public KenPom rank data, betting lines, and efficiency metrics
+# These serve as FALLBACK when external odds are unavailable
 # ---------------------------------------------------------------------------
 
 TEAM_RATINGS: Dict[str, float] = {
@@ -240,11 +273,18 @@ SETTLEMENT = {
 }
 
 
-def win_probability(rating_a: float, rating_b: float) -> float:
+def win_probability(rating_a: float, rating_b: float, team_a: str = "", team_b: str = "") -> float:
     """
-    Compute P(A beats B) using logistic model on AdjEM difference.
-    Calibrated so that ~5 point AdjEM gap ≈ 73% win probability.
+    Compute P(A beats B).
+    If bookmaker odds are available for this matchup, uses those (devigged).
+    Otherwise falls back to logistic model on AdjEM difference.
     """
+    # Check for bookmaker override first
+    if team_a and team_b and MATCHUP_OVERRIDES:
+        override = MATCHUP_OVERRIDES.get((team_a, team_b))
+        if override is not None:
+            return override
+
     diff = rating_a - rating_b
     return 1.0 / (1.0 + 10.0 ** (-diff / 11.0))
 
@@ -328,8 +368,8 @@ def resolve_first_four(eliminated: Optional[set] = None, live_games: Optional[Di
         elif b_elim and not a_elim:
             winner = team_a
         else:
-            rating_a = TEAM_RATINGS.get(team_a, 0.0)
-            rating_b = TEAM_RATINGS.get(team_b, 0.0)
+            rating_a = get_effective_rating(team_a)
+            rating_b = get_effective_rating(team_b)
             if team_a in live_games and live_games[team_a]["opponent"] == team_b:
                 lg = live_games[team_a]
                 p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"])
@@ -337,7 +377,7 @@ def resolve_first_four(eliminated: Optional[set] = None, live_games: Optional[Di
                 lg = live_games[team_b]
                 p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"])
             else:
-                p = win_probability(rating_a, rating_b)
+                p = win_probability(rating_a, rating_b, team_a, team_b)
             winner = team_a if random.random() < p else team_b
 
         results[placeholder] = winner
@@ -368,8 +408,8 @@ def simulate_round(
             # Both eliminated? Shouldn't happen, pick randomly
             winners.append(team_a)
         else:
-            rating_a = TEAM_RATINGS.get(team_a, 0.0)
-            rating_b = TEAM_RATINGS.get(team_b, 0.0)
+            rating_a = get_effective_rating(team_a)
+            rating_b = get_effective_rating(team_b)
             if team_a in live_games and live_games[team_a]["opponent"] == team_b:
                 lg = live_games[team_a]
                 p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"])
@@ -377,7 +417,7 @@ def simulate_round(
                 lg = live_games[team_b]
                 p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"])
             else:
-                p = win_probability(rating_a, rating_b)
+                p = win_probability(rating_a, rating_b, team_a, team_b)
             winner = team_a if random.random() < p else team_b
             winners.append(winner)
     return winners

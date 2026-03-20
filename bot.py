@@ -35,12 +35,15 @@ from model import (
     TEAM_TO_SYMBOL,
     TEAM_RATINGS,
     get_team_pace,
+    set_matchup_overrides,
+    set_adjusted_ratings,
 )
 from live_data import (
     get_eliminated_teams,
     get_live_games,
     espn_to_model_name,
 )
+from odds_api import OddsManager, blend_fair_values
 
 
 # ===== CONFIGURATION =====
@@ -167,6 +170,27 @@ class MadnessBot(Client):
         log.info("Bot starting...")
         log.info(f"Web view: {self.web_url}")
 
+        # Initialize external odds manager (The Odds API + Kalshi)
+        log.info("Initializing external odds feeds...")
+        self.odds_manager = OddsManager(self.session)
+        try:
+            await self.odds_manager.initialize()
+            # Push external odds into the model
+            if self.odds_manager.matchup_overrides:
+                set_matchup_overrides(self.odds_manager.matchup_overrides)
+                log.info(f"Loaded {len(self.odds_manager.matchup_overrides)//2} matchup overrides from bookmakers")
+            if self.odds_manager.adjusted_ratings:
+                set_adjusted_ratings(self.odds_manager.adjusted_ratings)
+                log.info(f"Loaded market-calibrated ratings for {len(self.odds_manager.adjusted_ratings)} teams")
+            odds_status = self.odds_manager.get_status()
+            log.info(f"Odds status: credits={odds_status['odds_api_credits']}, "
+                     f"matchups={odds_status['matchup_overrides']}, "
+                     f"champ_probs={odds_status['championship_probs']}, "
+                     f"kalshi_ws={'connected' if odds_status['kalshi_ws_connected'] else 'disconnected'}")
+        except Exception as e:
+            log.warning(f"External odds init failed (will use hardcoded ratings): {e}")
+            self.odds_manager = None
+
         # Check for already-eliminated teams from ESPN
         log.info("Checking ESPN for eliminated teams...")
         try:
@@ -180,9 +204,15 @@ class MadnessBot(Client):
         except Exception as e:
             log.warning(f"Could not fetch ESPN data: {e}")
 
-        # Initial fair value computation
+        # Initial fair value computation (now uses market-calibrated ratings)
         log.info(f"Computing fair values ({N_SIMULATIONS} simulations)...")
         self.fair_values = compute_fair_values(N_SIMULATIONS, self.eliminated_teams)
+
+        # Blend with championship market probabilities if available
+        if self.odds_manager and self.odds_manager.championship_probs:
+            self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
+            log.info("Blended MC fair values with market championship probabilities")
+
         self.last_recompute = time.time()
 
         log.info("Top 10 fair values:")
@@ -406,12 +436,31 @@ class MadnessBot(Client):
         if self.api_paused:
             return
 
-        # Check if we should recompute fair values (faster during live games)
+        # --- Refresh external odds periodically ---
         has_live = bool(getattr(self, 'live_games_map', {}))
+        if getattr(self, 'odds_manager', None):
+            try:
+                odds_updated = await self.odds_manager.refresh(has_live_games=has_live)
+                if odds_updated:
+                    # Push fresh odds into model
+                    if self.odds_manager.matchup_overrides:
+                        set_matchup_overrides(self.odds_manager.matchup_overrides)
+                    if self.odds_manager.adjusted_ratings:
+                        set_adjusted_ratings(self.odds_manager.adjusted_ratings)
+                    log.info("External odds refreshed and pushed to model")
+            except Exception as e:
+                log.debug(f"Odds refresh failed (non-critical): {e}")
+
+        # Check if we should recompute fair values (faster during live games)
         recompute_interval = RECOMPUTE_LIVE if has_live else RECOMPUTE_INTERVAL
         if time.time() - self.last_recompute > recompute_interval:
             log.info("Recomputing fair values...")
             self.fair_values = compute_fair_values(N_SIMULATIONS, self.eliminated_teams, getattr(self, 'live_games_map', None))
+
+            # Blend with market championship probs
+            if getattr(self, 'odds_manager', None) and self.odds_manager.championship_probs:
+                self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
+
             self.last_recompute = time.time()
             # Update symbol states
             for symbol, state in self.symbol_states.items():
@@ -787,10 +836,16 @@ async def print_status(bot: MadnessBot) -> None:
             qty * bot.symbol_states.get(sym, SymbolState()).fair_value
             for sym, qty in bot.positions.items()
         )
+        odds_info = ""
+        if getattr(bot, 'odds_manager', None):
+            status = bot.odds_manager.get_status()
+            odds_info = (f" | OddsAPI credits={status['odds_api_credits']} | "
+                        f"Matchups={status['matchup_overrides']} | "
+                        f"Kalshi={'WS' if status['kalshi_ws_connected'] else 'REST'}")
         log.info(
             f"STATUS: Cash={bot.cash:.0f} | Positions={pos_count} | "
             f"PositionValue~{pos_value:.0f} | Trades={bot.total_trades} | "
-            f"Trading={'ON' if bot.trading_enabled else 'OFF'}"
+            f"Trading={'ON' if bot.trading_enabled else 'OFF'}{odds_info}"
         )
 
 
