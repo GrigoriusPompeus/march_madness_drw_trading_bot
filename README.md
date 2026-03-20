@@ -167,6 +167,12 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 
 ---
 
+## Known Issues Fixed (v3 — March 20, 2026)
+
+**Team name mapping: step 2 substring collision** — The v2 fix applied word-boundary regex to step 3 (TEAM_RATINGS fallback) but step 2 (partial match against mapping dicts) still used bare `in` substring checks bidirectionally. If an API sent a shortened name like `"Michigan"`, the length-descending sort caused it to match `"Michigan State Spartans"` first — returning **Michigan State** instead of Michigan. Same issue for Iowa/Iowa State, Tennessee/Tennessee State, Texas/Texas Tech. Fixed by removing the dangerous input-in-key direction and using word-boundary regex for key-in-input only.
+
+**Pace never passed to live_win_probability()** — Bot calculated per-game pace and stored it in `live_games_map`, but MC simulation always used the default 68.0 possessions/game. High-tempo teams (Duke 76, Florida 75) and low-tempo teams (Virginia 62, Wisconsin 64) were modeled identically during live games. Fixed in both `simulate_round()` and `resolve_first_four()`.
+
 ## Known Issues Fixed (v2 — March 20, 2026)
 
 **Team name mapping bugs** — Fuzzy/substring fallbacks in all API integrations (ESPN, Odds API, Kalshi, exchange symbol matching) could map "Michigan State" to "Michigan" (and similar pairs: Iowa/Iowa State, Texas/Texas Tech, Tennessee/Tennessee State). All 7 fallback locations now use word-boundary regex matching with longest-name-first ordering.

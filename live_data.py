@@ -212,9 +212,12 @@ def espn_to_model_name(espn_name: str) -> Optional[str]:
     if espn_name in ESPN_TO_MODEL:
         return ESPN_TO_MODEL[espn_name]
 
-    # Partial match - check longer dict keys first to avoid substring collisions
+    # Partial match - only check if a known key appears IN the input (not vice versa)
+    # to avoid "Michigan" matching "Michigan State Spartans".
+    # If the input is shorter than all keys, step 3 (TEAM_RATINGS regex) handles it.
+    import re
     for espn, model in sorted(ESPN_TO_MODEL.items(), key=lambda x: len(x[0]), reverse=True):
-        if espn_name in espn or espn in espn_name:
+        if re.search(r'\b' + re.escape(espn) + r'\b', espn_name):
             return model
 
     # Try matching against model names - sort by length descending so

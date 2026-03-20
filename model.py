@@ -372,10 +372,12 @@ def resolve_first_four(eliminated: Optional[set] = None, live_games: Optional[Di
             rating_b = get_effective_rating(team_b)
             if team_a in live_games and live_games[team_a]["opponent"] == team_b:
                 lg = live_games[team_a]
-                p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"])
+                pace = lg.get("pace", 68.0)
+                p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"], expected_pace=pace)
             elif team_b in live_games and live_games[team_b]["opponent"] == team_a:
                 lg = live_games[team_b]
-                p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"])
+                pace = lg.get("pace", 68.0)
+                p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"], expected_pace=pace)
             else:
                 p = win_probability(rating_a, rating_b, team_a, team_b)
             winner = team_a if random.random() < p else team_b
@@ -412,10 +414,12 @@ def simulate_round(
             rating_b = get_effective_rating(team_b)
             if team_a in live_games and live_games[team_a]["opponent"] == team_b:
                 lg = live_games[team_a]
-                p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"])
+                pace = lg.get("pace", 68.0)
+                p = live_win_probability(rating_a, rating_b, lg["score_diff"], lg["time_remaining"], expected_pace=pace)
             elif team_b in live_games and live_games[team_b]["opponent"] == team_a:
                 lg = live_games[team_b]
-                p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"])
+                pace = lg.get("pace", 68.0)
+                p = live_win_probability(rating_a, rating_b, -lg["score_diff"], lg["time_remaining"], expected_pace=pace)
             else:
                 p = win_probability(rating_a, rating_b, team_a, team_b)
             winner = team_a if random.random() < p else team_b

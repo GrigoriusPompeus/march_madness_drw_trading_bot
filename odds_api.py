@@ -180,9 +180,12 @@ def resolve_team_name(api_name: str) -> Optional[str]:
     # Exact match
     if api_name in ODDS_API_TO_MODEL:
         return ODDS_API_TO_MODEL[api_name]
-    # Partial match - check longer dict keys first to avoid substring collisions
+    # Partial match - only check if a known key appears IN the input (not vice versa)
+    # to avoid "Michigan" matching "Michigan State Spartans".
+    # If the input is shorter than all keys, step 3 (TEAM_RATINGS regex) handles it.
+    import re
     for api, model in sorted(ODDS_API_TO_MODEL.items(), key=lambda x: len(x[0]), reverse=True):
-        if api_name in api or api in api_name:
+        if re.search(r'\b' + re.escape(api) + r'\b', api_name):
             return model
     # Try matching against model names directly - sort by length descending so
     # "Michigan State" is checked before "Michigan", etc.
