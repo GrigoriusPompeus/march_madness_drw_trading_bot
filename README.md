@@ -6,18 +6,20 @@ Algorithmic trading bot for DRW's Market Madness simulator (games.drw.com). Trad
 
 ## How It Works (Full Pipeline)
 
-### Step 1: Team Ratings
-- Uses **KenPom Adjusted Efficiency Margin (AdjEM)** ratings for all 68 teams
-- Top teams: Duke (35.2), Arizona (33.5), Michigan (32.8), Florida (30.4), Houston (28.7)
-- Win probability between two teams: `P(A beats B) = 1 / (1 + 10^(-AdjEM_diff / 11))`
-- A 5-point AdjEM gap gives ~73% win probability
+### Step 1: Team Ratings + Live Odds
+- **Baseline**: KenPom AdjEM ratings for all 68 teams (fallback when APIs are unavailable)
+- **Live odds integration**: Fetches real-time bookmaker consensus from **The Odds API** (15+ US sportsbooks) and **Kalshi** prediction market prices
+- Bookmaker moneylines are devigged (vig removed) and averaged across all available books
+- For scheduled/live matchups with bookmaker data, uses devigged market probability directly instead of rating-based model
+- For future hypothetical matchups (later bracket rounds), uses **market-calibrated ratings** — original AdjEM values nudged toward market consensus with 60% damping
+- Win probability formula (when no market data): `P(A beats B) = 1 / (1 + 10^(-AdjEM_diff / 11))`
 
-### Step 2: Monte Carlo Fair Values
+### Step 2: Monte Carlo Fair Values + Market Blending
 - Simulates the **entire 68-team bracket 100,000 times**
-- Each simulation plays out every game using the logistic win probability
+- Each simulation uses market-calibrated ratings and bookmaker matchup overrides when available
 - Fair value = average settlement across all simulations (weighted sum of 0/2/4/8/16/32/64)
-- Example: if Duke wins the championship in 40% of sims, reaches F4 in 25%, etc., its FV might be ~37
-- Total FV across all teams always sums to exactly **224** (the total points distributed)
+- MC fair values are then **blended with championship market probabilities** (35% market weight, 65% MC) from bookmakers and Kalshi
+- Total FV across all teams always sums to exactly **224** (preserved after blending)
 - Recomputes every **15 seconds during live games**, 30 seconds otherwise
 
 ### Step 3: Live Game Adjustments
@@ -82,10 +84,23 @@ The bot also posts passive **limit orders** near fair value:
 - Quantity: 3 contracts per side
 - Uses inventory-skewed FV so orders naturally lean toward reducing position
 
-### Step 7: Data Pipeline (ESPN API)
+### Step 7: Data Pipeline
+
+**ESPN API** (live game state):
 - **Live scores**: Fetched every **10 seconds** — score, clock, period for all in-progress games
 - **Eliminations**: Checked every **60 seconds** — scans last 5 days of results for final scores
 - **Failsafe**: If ESPN fails 3+ times in a row, ALL trading stops immediately. Resumes automatically when API recovers. The bot will never trade on stale data.
+
+**The Odds API** (bookmaker consensus):
+- Fetches devigged moneylines from 15+ US bookmakers (DraftKings, FanDuel, Caesars, etc.)
+- Championship/outright winner futures for all tournament teams
+- Polling: every **10 min** during live games, **15 min** pre-game, **1 hour** for futures
+- Budget: 500 free credits/month (~2 credits per startup, ~15 per game day)
+
+**Kalshi** (prediction market):
+- Streams real-time tournament advancement prices via **public WebSocket** (free, unlimited, no auth)
+- Game winner contracts, Final Four, Elite Eight, championship probabilities
+- Falls back to REST polling every 2 min if WebSocket disconnects
 
 ---
 
@@ -95,6 +110,7 @@ The bot also posts passive **limit orders** near fair value:
 |------|---------|
 | `bot.py` | Main trading bot — connects to DRW exchange, runs trading loop |
 | `model.py` | Monte Carlo engine — team ratings, bracket sim, fair values, live win probability |
+| `odds_api.py` | External odds integration — The Odds API client, Kalshi WebSocket, rating calibration, FV blending |
 | `live_data.py` | ESPN API integration — live scores, eliminations, team name mapping |
 | `trading_client.py` | DRW exchange client — WebSocket connection, order management |
 | `backtester.py` | Simple backtester replaying market_data.csv |
