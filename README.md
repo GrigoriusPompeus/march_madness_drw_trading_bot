@@ -167,6 +167,14 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 
 ---
 
+## Known Issues Fixed (v4 — March 20, 2026)
+
+**Missing ESPN name variants** — ESPN_TO_MODEL was missing `"California Baptist Lancers"` and `"Miami OH RedHawks"` alternate name formats. If ESPN returned either variant, the team would fail to resolve, causing eliminated teams to remain "alive" in the model or live scores to be silently dropped.
+
+**Backtest crash (backtest_compare.py)** — The head-to-head comparison section referenced an undefined variable `new` (7 occurrences) instead of `new_best`, causing a NameError crash whenever the backtest reached the comparison output.
+
+**Full stress test validation** — Ran 433 automated tests across all API integrations: Odds API, ESPN, exchange symbols, Kalshi title parsing, formula correctness, bracket integrity, and cross-API consistency. All substring collision pairs (Michigan/Michigan State, Iowa/Iowa State, Tennessee/Tennessee State, Miami FL/Miami OH, etc.) verified correct across every mapping system.
+
 ## Known Issues Fixed (v3 — March 20, 2026)
 
 **Team name mapping: step 2 substring collision** — The v2 fix applied word-boundary regex to step 3 (TEAM_RATINGS fallback) but step 2 (partial match against mapping dicts) still used bare `in` substring checks bidirectionally. If an API sent a shortened name like `"Michigan"`, the length-descending sort caused it to match `"Michigan State Spartans"` first — returning **Michigan State** instead of Michigan. Same issue for Iowa/Iowa State, Tennessee/Tennessee State, Texas/Texas Tech. Fixed by removing the dangerous input-in-key direction and using word-boundary regex for key-in-input only.

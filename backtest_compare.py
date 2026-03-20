@@ -270,16 +270,16 @@ def run_backtest():
     print("=" * 100)
 
     old_mtm = old.cash + sum(qty * last_fvs.get(sym, 0) for sym, qty in old.positions.items())
-    new_mtm = new.cash + sum(qty * last_fvs.get(sym, 0) for sym, qty in new.positions.items())
+    new_mtm = new_best.cash + sum(qty * last_fvs.get(sym, 0) for sym, qty in new_best.positions.items())
 
     old_max_loss = sum(abs(qty) * 64 for sym, qty in old.positions.items() if qty < 0)
-    new_max_loss = sum(abs(qty) * 64 for sym, qty in new.positions.items() if qty < 0)
+    new_max_loss = sum(abs(qty) * 64 for sym, qty in new_best.positions.items() if qty < 0)
 
     print(f"\n  {'Metric':<30} {'OLD':>15} {'NEW':>15} {'Delta':>15}")
     print(f"  {'-'*75}")
-    print(f"  {'Trades':<30} {len(old.trades):>15} {len(new.trades):>15} {len(new.trades)-len(old.trades):>+15}")
+    print(f"  {'Trades':<30} {len(old.trades):>15} {len(new_best.trades):>15} {len(new_best.trades)-len(old.trades):>+15}")
     print(f"  {'MTM P&L':<30} ${old_mtm:>14,.2f} ${new_mtm:>14,.2f} ${new_mtm-old_mtm:>+14,.2f}")
-    print(f"  {'Edge Captured':<30} ${old.total_edge:>14,.2f} ${new.total_edge:>14,.2f} ${new.total_edge-old.total_edge:>+14,.2f}")
+    print(f"  {'Edge Captured':<30} ${old.total_edge:>14,.2f} ${new_best.total_edge:>14,.2f} ${new_best.total_edge-old.total_edge:>+14,.2f}")
     print(f"  {'Max Short Loss':<30} ${old_max_loss:>14,.2f} ${new_max_loss:>14,.2f} ${new_max_loss-old_max_loss:>+14,.2f}")
 
     if old_max_loss > 0 and new_max_loss > 0:
@@ -287,11 +287,11 @@ def run_backtest():
         new_ra = new_mtm / new_max_loss * 100
         print(f"  {'Risk-Adj Return':<30} {old_ra:>14.2f}% {new_ra:>14.2f}% {new_ra-old_ra:>+14.2f}%")
 
-    print(f"  {'Wash Trade Skips':<30} {'N/A':>15} {new.wash_skips:>15}")
+    print(f"  {'Wash Trade Skips':<30} {'N/A':>15} {new_best.wash_skips:>15}")
 
     # Show trades unique to NEW but not in OLD (and vice versa)
     old_teams_traded = set(t[1] for t in old.trades)
-    new_teams_traded = set(t[1] for t in new.trades)
+    new_teams_traded = set(t[1] for t in new_best.trades)
     only_old = old_teams_traded - new_teams_traded
     only_new = new_teams_traded - old_teams_traded
 
@@ -303,11 +303,11 @@ def run_backtest():
     # Per-team comparison for shared teams
     print(f"\n  Per-Team Position Comparison (top differences):")
     print(f"    {'Symbol':<20} {'OLD Pos':>8} {'NEW Pos':>8} {'Diff':>8} {'OLD MTM':>10} {'NEW MTM':>10}")
-    all_symbols = set(list(old.positions.keys()) + list(new.positions.keys()))
+    all_symbols = set(list(old.positions.keys()) + list(new_best.positions.keys()))
     diffs = []
     for sym in all_symbols:
         old_pos = old.positions.get(sym, 0)
-        new_pos = new.positions.get(sym, 0)
+        new_pos = new_best.positions.get(sym, 0)
         if old_pos == 0 and new_pos == 0:
             continue
         fv = last_fvs.get(sym, 0)

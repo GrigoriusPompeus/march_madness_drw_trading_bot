@@ -191,6 +191,8 @@ ESPN_TO_MODEL = {
     "Kennesaw State Owls": "Kennesaw State",
     "North Dakota State Bison": "North Dakota State",
     "Cal Baptist Lancers": "Cal Baptist",
+    "California Baptist Lancers": "Cal Baptist",
+    "Miami OH RedHawks": "Miami OH",
     "Wright State Raiders": "Wright State",
     "Furman Paladins": "Furman",
     "Queens Royals": "Queens",
