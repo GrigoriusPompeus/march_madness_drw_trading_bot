@@ -92,7 +92,7 @@ def init_csv_logs():
     if not os.path.exists("trades.csv"):
         with open("trades.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "symbol", "team", "side", "qty", "price", "fair_value", "edge"])
+            writer.writerow(["timestamp", "symbol", "team", "side", "qty", "price", "fair_value", "edge", "skewed_fv", "skewed_edge"])
             
     if not os.path.exists("market_data.csv"):
         with open("market_data.csv", "w", newline="") as f:
@@ -114,12 +114,14 @@ def log_live_score_csv(home: str, away: str, h_score: int, a_score: int, clock: 
     except Exception:
         pass
 
-def log_trade_csv(symbol: str, team: str, side: str, qty: int, price: float, fv: float):
+def log_trade_csv(symbol: str, team: str, side: str, qty: int, price: float, fv: float, skewed_fv: float = None):
     try:
         with open("trades.csv", "a", newline="") as f:
             writer = csv.writer(f)
             edge = fv - price if side == "BUY" else price - fv
-            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), symbol, team, side, qty, price, round(fv, 2), round(edge, 2)])
+            sfv = skewed_fv if skewed_fv is not None else fv
+            skewed_edge = sfv - price if side == "BUY" else price - sfv
+            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), symbol, team, side, qty, price, round(fv, 2), round(edge, 2), round(sfv, 2), round(skewed_edge, 2)])
     except Exception as e:
         log.error(f"Failed to log trade to CSV: {e}")
 
@@ -140,6 +142,7 @@ class SymbolState:
     last_order_time: float = 0.0
     buy_orders: int = 0
     sell_orders: int = 0
+    skewed_fv: float = 0.0
 
 
 class MadnessBot(Client):
@@ -167,6 +170,8 @@ class MadnessBot(Client):
         self.live_games_map: Dict = {}          # team -> live game info
         self.data_stale: bool = False           # Whether ESPN data is stale
         self.risk_reducing_only: bool = False   # PnL floor failsafe flag
+        self.last_book_snapshot: Dict[str, tuple] = {}  # symbol -> (bid, ask, timestamp)
+        self.stale_book_count: Dict[str, int] = {}      # symbol -> consecutive unchanged cycles
 
     async def on_start(self) -> None:
         """Initialize and start the trading loop."""
@@ -564,6 +569,7 @@ class MadnessBot(Client):
         # --- Avellaneda-Stoikov: penalize FV based on inventory ---
         inventory_penalty = position * RISK_AVERSION_GAMMA
         skewed_fv = fair_value - inventory_penalty
+        state.skewed_fv = skewed_fv
 
         # Enhanced OV: only during live games (pre-game FV already captures uncertainty via MC)
         is_live_game = (live_games and team_name in live_games and time_rem < 2400.0)
@@ -666,6 +672,21 @@ class MadnessBot(Client):
         """
         fv = state.fair_value  # Always use raw FV for limit order placement
         if fv < MIN_PRICE or fv > MAX_PRICE:
+            return
+
+        # Stale book detection: skip limit orders if book hasn't changed
+        # for multiple cycles (frozen market / no real counterparties)
+        current_snap = (book.best_bid_px, book.best_ask_px)
+        prev_snap = self.last_book_snapshot.get(symbol)
+        if prev_snap and prev_snap[:2] == current_snap:
+            self.stale_book_count[symbol] = self.stale_book_count.get(symbol, 0) + 1
+        else:
+            self.stale_book_count[symbol] = 0
+        self.last_book_snapshot[symbol] = current_snap + (time.time(),)
+
+        # If book unchanged for 6+ consecutive cycles (~90s at 15s recompute),
+        # market is frozen — don't post limit orders (they'll just sit stale)
+        if self.stale_book_count.get(symbol, 0) >= 6:
             return
 
         # Cancel existing orders first to avoid stacking
@@ -806,7 +827,8 @@ class MadnessBot(Client):
             # Log to CSV
             state = self.symbol_states.get(fill.display_symbol)
             fv = state.fair_value if state else 0.0
-            log_trade_csv(fill.display_symbol, team, side, abs(fill.traded_qty), fill.px, fv)
+            sfv = state.skewed_fv if state else 0.0
+            log_trade_csv(fill.display_symbol, team, side, abs(fill.traded_qty), fill.px, fv, sfv)
 
     async def on_order_update(self, order: Order) -> None:
         """Log order updates."""
