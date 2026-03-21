@@ -17,11 +17,13 @@ if ($killed -eq 0) { Write-Host "  No existing bot found." }
 
 Start-Sleep -Seconds 2
 
-# 2. Prevent sleep mode (AC power)
-Write-Host "Disabling sleep/hibernate (AC power)..." -ForegroundColor Yellow
+# 2. Prevent sleep mode (AC + battery)
+Write-Host "Disabling sleep/hibernate..." -ForegroundColor Yellow
 powercfg -change -standby-timeout-ac 0
 powercfg -change -hibernate-timeout-ac 0
-Write-Host "  Sleep disabled while plugged in."
+powercfg -change -standby-timeout-dc 0
+powercfg -change -hibernate-timeout-dc 0
+Write-Host "  Sleep/hibernate disabled (AC + battery)."
 
 # 3. Start bot in background
 Write-Host "Starting updated bot..." -ForegroundColor Green

@@ -82,19 +82,52 @@ async def fetch_tournament_scores(
     return games
 
 
+_elim_cache: Tuple[Set[str], Dict[str, str]] = (set(), {})
+_elim_cache_time: float = 0.0
+_ELIM_CACHE_TTL: float = 300.0  # Only re-fetch all 6 days every 5 minutes
+
 async def get_eliminated_teams(
     session: aiohttp.ClientSession,
 ) -> Tuple[Set[str], Dict[str, str]]:
     """
     Check all tournament dates to find eliminated teams.
+    Caches results for 5 minutes to avoid excessive ESPN API calls.
     Returns:
         eliminated: set of eliminated team names
         game_results: dict of winner -> loser for completed games
     """
+    global _elim_cache, _elim_cache_time
+    import time as _time
+    now = _time.time()
+    if _elim_cache[0] and (now - _elim_cache_time) < _ELIM_CACHE_TTL:
+        # Only check today for new results (1 API call instead of 6)
+        today = datetime.now().strftime("%Y%m%d")
+        games = await fetch_tournament_scores(session, today)
+        eliminated, results = set(_elim_cache[0]), dict(_elim_cache[1])
+        new_found = False
+        for game in games:
+            if game.get("status") == "STATUS_FINAL":
+                home = game.get("home_team", "")
+                away = game.get("away_team", "")
+                h_score = game.get("home_score", 0)
+                a_score = game.get("away_score", 0)
+                if h_score > a_score:
+                    winner, loser = home, away
+                else:
+                    winner, loser = away, home
+                if loser not in eliminated:
+                    new_found = True
+                    log.info(f"Game result: {winner} def. {loser} ({h_score}-{a_score})")
+                eliminated.add(loser)
+                results[winner] = loser
+        if new_found:
+            _elim_cache = (eliminated, results)
+        return eliminated, results
+
+    # Full refresh: check all days
     eliminated = set()
     results = {}
 
-    # Check several days of tournament
     today = datetime.now()
     for delta in range(-5, 1):
         date = (today + timedelta(days=delta)).strftime("%Y%m%d")
@@ -116,6 +149,8 @@ async def get_eliminated_teams(
                 results[winner] = loser
                 log.info(f"Game result: {winner} def. {loser} ({h_score}-{a_score})")
 
+    _elim_cache = (eliminated, results)
+    _elim_cache_time = now
     return eliminated, results
 
 

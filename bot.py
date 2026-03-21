@@ -17,6 +17,7 @@ Usage:
 
 import asyncio
 import logging
+import logging.handlers
 import math
 import time
 import csv
@@ -73,7 +74,7 @@ WASH_TRADE_SPREAD = 0.5       # Spread threshold for wash trade detection
 WASH_TRADE_FV_DIST = 2.0      # Min FV distance to flag wash trading
 
 # Monte Carlo settings
-N_SIMULATIONS = 100000
+N_SIMULATIONS = 50000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,7 +82,9 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", mode="a")
+        logging.handlers.RotatingFileHandler(
+            "bot.log", mode="a", maxBytes=5*1024*1024, backupCount=3
+        ),
     ],
     force=True
 )
@@ -349,8 +352,8 @@ class MadnessBot(Client):
                     return (mins * 60 + secs)
                 elif period > 2:
                     return (mins * 60 + secs)
-            except:
-                pass
+            except (ValueError, TypeError, AttributeError) as e:
+                log.warning(f"Failed to parse clock '{clock_str}' period={period}: {e}")
             return 0.0
 
         now = time.time()
@@ -465,7 +468,9 @@ class MadnessBot(Client):
         recompute_interval = RECOMPUTE_LIVE if has_live else RECOMPUTE_INTERVAL
         if time.time() - self.last_recompute > recompute_interval:
             log.info("Recomputing fair values...")
-            self.fair_values = compute_fair_values(N_SIMULATIONS, self.eliminated_teams, getattr(self, 'live_games_map', None))
+            self.fair_values = await asyncio.to_thread(
+                compute_fair_values, N_SIMULATIONS, self.eliminated_teams, getattr(self, 'live_games_map', None)
+            )
 
             # Blend with market championship probs
             if getattr(self, 'odds_manager', None) and self.odds_manager.championship_probs:
@@ -532,6 +537,10 @@ class MadnessBot(Client):
         """Evaluate a single symbol and potentially trade."""
         fair_value = state.fair_value
         team_name = self.matched_symbols.get(symbol, "")
+
+        # Guard: never trade when fair value is zero or near-zero
+        if fair_value < 0.1:
+            return
 
         # Stale data filter
         if getattr(self, 'data_stale', False):
@@ -711,9 +720,11 @@ class MadnessBot(Client):
                 bid_px = min(bid_px, book.best_bid_px + 0.1)
             if bid_px >= MIN_PRICE and bid_px < fv:
                 bid_qty = min(3, MAX_POSITION - position)
-                # Cap bid qty: if long, allow up to 3; if short, allow covering
-                # but never let limit orders flip us from short to long beyond +3
-                if position < 0:
+                # Limit orders only REDUCE positions or stay flat.
+                # If already long, don't deepen. If short, only cover up to flat.
+                if position >= 0:
+                    bid_qty = 0  # already long or flat — don't add via limit
+                else:
                     bid_qty = min(bid_qty, -position)  # only cover up to flat
                 if getattr(self, "risk_reducing_only", False):
                     if position >= 0:
@@ -734,9 +745,11 @@ class MadnessBot(Client):
                 ask_px = max(ask_px, book.best_ask_px - 0.1)
             if ask_px <= MAX_PRICE and ask_px > fv:
                 ask_qty = min(3, MAX_POSITION + position)
-                # Cap ask qty: if short, allow up to 3; if long, allow reducing
-                # but never let limit orders flip us from long to short beyond -3
-                if position > 0:
+                # Limit orders only REDUCE positions or stay flat.
+                # If already short, don't deepen. If long, only reduce to flat.
+                if position <= 0:
+                    ask_qty = 0  # already short or flat — don't add via limit
+                else:
                     ask_qty = min(ask_qty, position)  # only reduce to flat
                 if getattr(self, "risk_reducing_only", False):
                     if position <= 0:
@@ -891,6 +904,41 @@ async def print_status(bot: MadnessBot) -> None:
 
 # === ENTRY POINT ===
 
+PID_FILE = "bot.pid"
+
+def acquire_pid_lock():
+    """Prevent multiple bot instances from running simultaneously."""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            # Check if the old process is still running
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x100000, False, old_pid)  # SYNCHRONIZE
+            if handle:
+                kernel32.CloseHandle(handle)
+                log.critical(f"Another bot instance is already running (PID {old_pid}). Exiting.")
+                sys.exit(1)
+            else:
+                log.warning(f"Stale PID file found (PID {old_pid} not running). Removing.")
+        except (ValueError, OSError):
+            pass
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    log.info(f"Acquired PID lock (PID {os.getpid()})")
+
+def release_pid_lock():
+    """Remove PID file on exit."""
+    try:
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE, "r") as f:
+                pid = int(f.read().strip())
+            if pid == os.getpid():
+                os.remove(PID_FILE)
+    except Exception:
+        pass
+
 async def main():
     if TOKEN == "YOUR_TOKEN_HERE":
         print("=" * 60)
@@ -914,18 +962,25 @@ async def main():
                 print(f"{team:<25} {fv:>10.2f}")
         return
 
-    async with create_session() as session:
-        bot = MadnessBot(session, GAME_ID, TOKEN, BASE_URL)
-        log.info(f"Access web view at {bot.web_url}")
+    acquire_pid_lock()
+    import atexit
+    atexit.register(release_pid_lock)
 
-        # Register if needed
-        try:
-            await bot.register()
-            log.info("Registered successfully")
-        except Exception as e:
-            log.info(f"Registration: {e} (may already be registered)")
+    try:
+        async with create_session() as session:
+            bot = MadnessBot(session, GAME_ID, TOKEN, BASE_URL)
+            log.info(f"Access web view at {bot.web_url}")
 
-        await bot.start()
+            # Register if needed
+            try:
+                await bot.register()
+                log.info("Registered successfully")
+            except Exception as e:
+                log.info(f"Registration: {e} (may already be registered)")
+
+            await bot.start()
+    finally:
+        release_pid_lock()
 
 
 if __name__ == "__main__":
