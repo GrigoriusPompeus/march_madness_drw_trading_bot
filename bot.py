@@ -675,6 +675,19 @@ class MadnessBot(Client):
         if fair_value < 0.1:
             return
 
+        # Guard: for eliminated teams, force FV to known settlement and only
+        # allow position-reducing trades. Prevents buying dead contracts.
+        if team_name in self.known_settlements:
+            settlement = self.known_settlements[team_name]
+            fair_value = float(settlement)
+            state.fair_value = fair_value
+            if fair_value < 0.1:
+                return
+            position = self.positions.get(symbol, 0)
+            # If flat on an eliminated team, skip entirely — no new positions
+            if position == 0:
+                return
+
         # Stale data filter
         if getattr(self, 'data_stale', False):
             return
