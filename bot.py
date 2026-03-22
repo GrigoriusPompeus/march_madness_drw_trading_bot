@@ -178,6 +178,10 @@ class MadnessBot(Client):
         self.risk_reducing_only: bool = False   # PnL floor failsafe flag
         self.last_book_snapshot: Dict[str, tuple] = {}  # symbol -> (bid, ask, timestamp)
         self.stale_book_count: Dict[str, int] = {}      # symbol -> consecutive unchanged cycles
+        # Track exchange position-limit rejections per symbol per direction.
+        # Key: (symbol, "buy"|"sell"), Value: position at time of rejection.
+        # Cleared when position moves toward zero (i.e. a reducing fill came in).
+        self._pos_limit_blocked: Dict[tuple, int] = {}
 
     async def on_start(self) -> None:
         """Initialize and start the trading loop."""
@@ -600,7 +604,12 @@ class MadnessBot(Client):
         hard_max_px = 57.6
 
         # === BUY LOGIC ===
-        if book.best_ask_px is not None and position < MAX_POSITION:
+        # A buy increases position. Skip if exchange already rejected at this
+        # position level — unless we're short (buy would *reduce* magnitude).
+        buy_blocked = False
+        if (symbol, "buy") in self._pos_limit_blocked and position >= 0:
+            buy_blocked = True
+        if book.best_ask_px is not None and position < MAX_POSITION and not buy_blocked:
             ask = book.best_ask_px
             # Calculate intrinsic edge using skewed FV
             buy_edge = skewed_fv - ask
@@ -622,6 +631,8 @@ class MadnessBot(Client):
                             order = await self.send_order(symbol, ask, qty, "LIMIT")
                             state.last_order_time = time.time()
                             self.total_trades += 1
+                            # Order accepted — clear any stale block for this direction
+                            self._pos_limit_blocked.pop((symbol, "buy"), None)
                             team = self.matched_symbols.get(symbol, symbol)
                             log.info(
                                 f"BUY  {qty:>3}x {team:<20} @ {ask:>5.1f}  "
@@ -629,10 +640,17 @@ class MadnessBot(Client):
                                 f"OV={option_value:.2f}, req={effective_req:.1f}, pos={position})"
                             )
                         except Exception as e:
+                            if "osition limit" in str(e):
+                                self._pos_limit_blocked[(symbol, "buy")] = position
                             log.error(f"Buy order failed for {symbol}: {e}")
 
         # === SELL LOGIC ===
-        if book.best_bid_px is not None and position > -MAX_POSITION:
+        # A sell decreases position. Skip if exchange already rejected at this
+        # position level — unless we're long (sell would *reduce* magnitude).
+        sell_blocked = False
+        if (symbol, "sell") in self._pos_limit_blocked and position <= 0:
+            sell_blocked = True
+        if book.best_bid_px is not None and position > -MAX_POSITION and not sell_blocked:
             bid = book.best_bid_px
             # Calculate intrinsic edge using skewed FV
             sell_edge = bid - skewed_fv
@@ -653,6 +671,8 @@ class MadnessBot(Client):
                             order = await self.send_order(symbol, bid, -qty, "LIMIT")
                             state.last_order_time = time.time()
                             self.total_trades += 1
+                            # Order accepted — clear any stale block for this direction
+                            self._pos_limit_blocked.pop((symbol, "sell"), None)
                             team = self.matched_symbols.get(symbol, symbol)
                             log.info(
                                 f"SELL {qty:>3}x {team:<20} @ {bid:>5.1f}  "
@@ -660,6 +680,8 @@ class MadnessBot(Client):
                                 f"OV={option_value:.2f}, req={effective_req:.1f}, pos={position})"
                             )
                         except Exception as e:
+                            if "osition limit" in str(e):
+                                self._pos_limit_blocked[(symbol, "sell")] = position
                             log.error(f"Sell order failed for {symbol}: {e}")
 
         # === MARKET MAKING (post limit orders near fair value) ===
@@ -834,17 +856,22 @@ class MadnessBot(Client):
     async def on_fills(self, new_fills: List[Fill]) -> None:
         """Log fills."""
         for fill in new_fills:
-            team = self.matched_symbols.get(fill.display_symbol, fill.display_symbol)
+            sym = fill.display_symbol
+            team = self.matched_symbols.get(sym, sym)
             side = "BUY" if fill.traded_qty > 0 else "SELL"
             log.info(
                 f"FILL: {side} {abs(fill.traded_qty)}x {team} @ {fill.px:.1f} "
                 f"(remaining: {fill.remaining_qty})"
             )
+            # A fill changed our position — clear exchange-limit blocks for
+            # this symbol so the bot re-evaluates on the next cycle.
+            self._pos_limit_blocked.pop((sym, "buy"), None)
+            self._pos_limit_blocked.pop((sym, "sell"), None)
             # Log to CSV
-            state = self.symbol_states.get(fill.display_symbol)
+            state = self.symbol_states.get(sym)
             fv = state.fair_value if state else 0.0
             sfv = state.skewed_fv if state else 0.0
-            log_trade_csv(fill.display_symbol, team, side, abs(fill.traded_qty), fill.px, fv, sfv)
+            log_trade_csv(sym, team, side, abs(fill.traded_qty), fill.px, fv, sfv)
 
     async def on_order_update(self, order: Order) -> None:
         """Log order updates."""
