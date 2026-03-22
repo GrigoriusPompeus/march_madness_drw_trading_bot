@@ -177,12 +177,42 @@ class MadnessBot(Client):
         self.live_games_map: Dict = {}          # team -> live game info
         self.data_stale: bool = False           # Whether ESPN data is stale
         self.risk_reducing_only: bool = False   # PnL floor failsafe flag
+        self.known_settlements: Dict[str, float] = {}   # team -> known settlement for eliminated teams
         self.last_book_snapshot: Dict[str, tuple] = {}  # symbol -> (bid, ask, timestamp)
         self.stale_book_count: Dict[str, int] = {}      # symbol -> consecutive unchanged cycles
         # Track exchange position-limit rejections per symbol per direction.
         # Key: (symbol, "buy"|"sell"), Value: position at time of rejection.
         # Cleared when position moves toward zero (i.e. a reducing fill came in).
         self._pos_limit_blocked: Dict[tuple, int] = {}
+
+    def _compute_known_settlements(self, results: list) -> None:
+        """Compute known settlement values for eliminated teams based on game results.
+
+        Settlement rules: R1 exit=0, R2 exit=2, S16 exit=4, E8 exit=8, F4 exit=16, Runner-up=32.
+        An eliminated team's settlement = number of tournament wins * 2^(round_index).
+        We count wins by checking how many times each eliminated team appears as a winner.
+        results is a list of (winner_espn_name, loser_espn_name) tuples.
+        """
+        # Count tournament wins for every team
+        win_counts: Dict[str, int] = {}
+        for winner_espn, loser_espn in results:
+            model_name = espn_to_model_name(winner_espn)
+            if model_name:
+                win_counts[model_name] = win_counts.get(model_name, 0) + 1
+
+        # For eliminated teams, settlement based on number of wins:
+        # 0 wins = R1 exit (0), 1 win = R2 exit (2), 2 wins = S16 exit (4),
+        # 3 wins = E8 exit (8), 4 wins = F4 exit (16), 5 wins = Runner-up (32)
+        settlement_by_wins = {0: 0, 1: 2, 2: 4, 3: 8, 4: 16, 5: 32}
+        for team in self.eliminated_teams:
+            wins = win_counts.get(team, 0)
+            self.known_settlements[team] = settlement_by_wins.get(wins, wins * 2)
+
+    def _apply_known_settlements(self) -> None:
+        """Override fair values for eliminated teams with their known settlement."""
+        for team, settlement in self.known_settlements.items():
+            if team in self.fair_values:
+                self.fair_values[team] = float(settlement)
 
     async def on_start(self) -> None:
         """Initialize and start the trading loop."""
@@ -218,8 +248,12 @@ class MadnessBot(Client):
                 model_name = espn_to_model_name(espn_name)
                 if model_name:
                     self.eliminated_teams.add(model_name)
+            # Compute known settlements from game results
+            self._compute_known_settlements(results)
             if self.eliminated_teams:
                 log.info(f"Already eliminated: {self.eliminated_teams}")
+            if self.known_settlements:
+                log.info(f"Known settlements: { {t: v for t, v in sorted(self.known_settlements.items()) if v > 0} }")
         except Exception as e:
             log.warning(f"Could not fetch ESPN data: {e}")
 
@@ -231,6 +265,9 @@ class MadnessBot(Client):
         if self.odds_manager and self.odds_manager.championship_probs:
             self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
             log.info("Blended MC fair values with market championship probabilities")
+
+        # Override eliminated teams with known settlement values
+        self._apply_known_settlements()
 
         self.last_recompute = time.time()
 
@@ -389,11 +426,12 @@ class MadnessBot(Client):
         if now - self.last_espn_elim > ESPN_ELIM_INTERVAL:
             self.last_espn_elim = now
             try:
-                eliminated, _ = await get_eliminated_teams(self.session)
+                eliminated, results = await get_eliminated_teams(self.session)
                 for espn_name in eliminated:
                     model_name = espn_to_model_name(espn_name)
                     if model_name:
                         self.eliminated_teams.add(model_name)
+                self._compute_known_settlements(results)
             except Exception:
                 pass
 
@@ -417,6 +455,7 @@ class MadnessBot(Client):
             )
             if getattr(self, 'odds_manager', None) and self.odds_manager.championship_probs:
                 self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
+            self._apply_known_settlements()
             self.last_recompute = now
             for symbol, state in self.symbol_states.items():
                 team = self.matched_symbols.get(symbol)
@@ -522,7 +561,7 @@ class MadnessBot(Client):
         if now - self.last_espn_elim > ESPN_ELIM_INTERVAL:
             self.last_espn_elim = now
             try:
-                eliminated, _ = await get_eliminated_teams(self.session)
+                eliminated, results = await get_eliminated_teams(self.session)
                 new_elims = set()
                 for espn_name in eliminated:
                     model_name = espn_to_model_name(espn_name)
@@ -531,6 +570,7 @@ class MadnessBot(Client):
                         self.eliminated_teams.add(model_name)
                 if new_elims:
                     log.info(f"NEW ELIMINATIONS: {new_elims}")
+                    self._compute_known_settlements(results)
                     self.last_recompute = 0
             except Exception as e:
                 log.debug(f"ESPN elimination check failed: {e}")
@@ -565,6 +605,9 @@ class MadnessBot(Client):
             # Blend with market championship probs
             if getattr(self, 'odds_manager', None) and self.odds_manager.championship_probs:
                 self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
+
+            # Override eliminated teams with known settlement values
+            self._apply_known_settlements()
 
             self.last_recompute = time.time()
             # Update symbol states

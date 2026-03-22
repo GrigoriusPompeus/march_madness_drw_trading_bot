@@ -82,19 +82,19 @@ async def fetch_tournament_scores(
     return games
 
 
-_elim_cache: Tuple[Set[str], Dict[str, str]] = (set(), {})
+_elim_cache: Tuple[Set[str], List[Tuple[str, str]]] = (set(), [])
 _elim_cache_time: float = 0.0
 _ELIM_CACHE_TTL: float = 300.0  # Only re-fetch all 6 days every 5 minutes
 
 async def get_eliminated_teams(
     session: aiohttp.ClientSession,
-) -> Tuple[Set[str], Dict[str, str]]:
+) -> Tuple[Set[str], List[Tuple[str, str]]]:
     """
     Check all tournament dates to find eliminated teams.
     Caches results for 5 minutes to avoid excessive ESPN API calls.
     Returns:
         eliminated: set of eliminated team names
-        game_results: dict of winner -> loser for completed games
+        game_results: list of (winner, loser) tuples for completed games
     """
     global _elim_cache, _elim_cache_time
     import time as _time
@@ -103,7 +103,9 @@ async def get_eliminated_teams(
         # Only check today for new results (1 API call instead of 6)
         today = datetime.now().strftime("%Y%m%d")
         games = await fetch_tournament_scores(session, today)
-        eliminated, results = set(_elim_cache[0]), dict(_elim_cache[1])
+        eliminated = set(_elim_cache[0])
+        seen_pairs = {(w, l) for w, l in _elim_cache[1]}
+        results = list(_elim_cache[1])
         new_found = False
         for game in games:
             if game.get("status") == "STATUS_FINAL":
@@ -119,14 +121,17 @@ async def get_eliminated_teams(
                     new_found = True
                     log.info(f"Game result: {winner} def. {loser} ({h_score}-{a_score})")
                 eliminated.add(loser)
-                results[winner] = loser
+                if (winner, loser) not in seen_pairs:
+                    results.append((winner, loser))
+                    seen_pairs.add((winner, loser))
         if new_found:
             _elim_cache = (eliminated, results)
         return eliminated, results
 
     # Full refresh: check all days
     eliminated = set()
-    results = {}
+    results = []
+    seen_pairs = set()
 
     today = datetime.now()
     for delta in range(-5, 1):
@@ -146,7 +151,9 @@ async def get_eliminated_teams(
                     winner, loser = away, home
 
                 eliminated.add(loser)
-                results[winner] = loser
+                if (winner, loser) not in seen_pairs:
+                    results.append((winner, loser))
+                    seen_pairs.add((winner, loser))
                 log.info(f"Game result: {winner} def. {loser} ({h_score}-{a_score})")
 
     _elim_cache = (eliminated, results)
