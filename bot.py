@@ -70,6 +70,7 @@ ESPN_LIVE_INTERVAL = 10     # ESPN live scores check interval (seconds)
 ESPN_ELIM_INTERVAL = 60     # ESPN eliminations check interval (seconds)
 API_FAIL_THRESHOLD = 3      # Consecutive ESPN failures before pausing trading
 ORDER_COOLDOWN = 5.0        # Min seconds between orders on same symbol
+WARMUP_SECONDS = 150        # Warmup period (2.5 min) before first trade — allows APIs to settle
 
 # Avellaneda-Stoikov / wash trade parameters
 RISK_AVERSION_GAMMA = 0.05    # Avellaneda-Stoikov inventory penalty
@@ -242,6 +243,22 @@ class MadnessBot(Client):
         # Discover symbols from orderbook
         await self._discover_symbols()
 
+        # ── Warmup period: let APIs settle before trading ──
+        log.info(f"=== WARMUP: waiting {WARMUP_SECONDS}s ({WARMUP_SECONDS//60}m {WARMUP_SECONDS%60}s) before first trade ===")
+        warmup_start = time.time()
+        while time.time() - warmup_start < WARMUP_SECONDS:
+            elapsed = int(time.time() - warmup_start)
+            remaining = WARMUP_SECONDS - elapsed
+            # Refresh data during warmup (odds, ESPN, recompute FVs) but don't trade
+            try:
+                await self._refresh_data_only()
+            except Exception as e:
+                log.warning(f"Warmup data refresh error: {e}")
+            if remaining % 30 == 0 and remaining > 0:
+                log.info(f"  Warmup: {remaining}s remaining — data feeds active, trading paused")
+            await asyncio.sleep(5)
+        log.info("=== WARMUP COMPLETE — trading enabled ===")
+
         # Main trading loop
         while True:
             try:
@@ -340,6 +357,72 @@ class MadnessBot(Client):
                         SYMBOL_TO_TEAM[symbol] = team
                         self.matched_symbols[symbol] = team
                         break
+
+    async def _refresh_data_only(self) -> None:
+        """Refresh all data feeds (ESPN, odds, FVs) without trading.
+        Used during the warmup period so data is fresh before first trade."""
+        now = time.time()
+
+        # ESPN live scores
+        if now - self.last_espn_live > ESPN_LIVE_INTERVAL:
+            self.last_espn_live = now
+            try:
+                live_games_espn = await get_live_games(self.session)
+                live_games_map = {}
+                for g in live_games_espn:
+                    home = espn_to_model_name(g.get('home_team', ''))
+                    away = espn_to_model_name(g.get('away_team', ''))
+                    if not home or not away:
+                        continue
+                    diff = g.get('home_score', 0) - g.get('away_score', 0)
+                    home_pace = get_team_pace(home)
+                    away_pace = get_team_pace(away)
+                    avg_pace = (home_pace + away_pace) / 2.0
+                    live_games_map[home] = {'opponent': away, 'score_diff': diff, 'time_remaining': 0, 'pace': avg_pace}
+                    live_games_map[away] = {'opponent': home, 'score_diff': -diff, 'time_remaining': 0, 'pace': avg_pace}
+                self.live_games_map = live_games_map
+                self.espn_consecutive_fails = 0
+            except Exception as e:
+                log.debug(f"Warmup ESPN check: {e}")
+
+        # ESPN eliminations
+        if now - self.last_espn_elim > ESPN_ELIM_INTERVAL:
+            self.last_espn_elim = now
+            try:
+                eliminated, _ = await get_eliminated_teams(self.session)
+                for espn_name in eliminated:
+                    model_name = espn_to_model_name(espn_name)
+                    if model_name:
+                        self.eliminated_teams.add(model_name)
+            except Exception:
+                pass
+
+        # Refresh external odds
+        if getattr(self, 'odds_manager', None):
+            try:
+                has_live = bool(self.live_games_map)
+                odds_updated = await self.odds_manager.refresh(has_live_games=has_live)
+                if odds_updated:
+                    if self.odds_manager.matchup_overrides:
+                        set_matchup_overrides(self.odds_manager.matchup_overrides)
+                    if self.odds_manager.adjusted_ratings:
+                        set_adjusted_ratings(self.odds_manager.adjusted_ratings)
+            except Exception:
+                pass
+
+        # Recompute fair values
+        if now - self.last_recompute > RECOMPUTE_INTERVAL:
+            self.fair_values = await asyncio.to_thread(
+                compute_fair_values, N_SIMULATIONS, self.eliminated_teams, getattr(self, 'live_games_map', None)
+            )
+            if getattr(self, 'odds_manager', None) and self.odds_manager.championship_probs:
+                self.fair_values = blend_fair_values(self.fair_values, self.odds_manager.championship_probs)
+            self.last_recompute = now
+            for symbol, state in self.symbol_states.items():
+                team = self.matched_symbols.get(symbol)
+                if team:
+                    state.fair_value = self.fair_values.get(team, 0.0)
+            log.info("Warmup: fair values recomputed")
 
     async def _trading_cycle(self) -> None:
         """One iteration of the trading loop."""

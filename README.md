@@ -125,6 +125,18 @@ The bot also posts passive **limit orders** near fair value:
 
 ---
 
+## Startup Warmup
+
+On launch, the bot runs a **2.5-minute warmup period** before executing any trades. During warmup:
+- All API feeds are active (ESPN scores, The Odds API, Kalshi WebSocket)
+- Fair values are recomputed with fresh data
+- Eliminations are detected
+- **No orders are placed** until warmup completes
+
+This ensures the bot has fully settled odds, correct probabilities, and completed Monte Carlo simulations before risking capital. Progress is logged every 30 seconds.
+
+---
+
 ## How to Run
 
 ### Quick Restart (kills old bot, starts new one, prevents sleep)
