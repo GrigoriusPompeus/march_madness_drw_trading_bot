@@ -17,15 +17,19 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
 import aiohttp
+from dotenv import load_dotenv
+
+load_dotenv()
 
 log = logging.getLogger("odds")
 
 # ── The Odds API config ──────────────────────────────────────────────────────
-ODDS_API_KEY = "REDACTED_ODDS_API_KEY"
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "YOUR_ODDS_API_KEY_HERE")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 NCAAB_SPORT = "basketball_ncaab"
 

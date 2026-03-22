@@ -1,11 +1,15 @@
 """Quick test: connect to DRW exchange, register, and list all symbols + orderbooks."""
 import asyncio
+import os
 import aiohttp
 import json
+from dotenv import load_dotenv
 
-TOKEN = "REDACTED_DRW_TOKEN"
-GAME_ID = 160
-BASE_URL = "https://games.drw.com"
+load_dotenv()
+
+TOKEN = os.environ.get("DRW_TOKEN", "YOUR_TOKEN_HERE")
+GAME_ID = int(os.environ.get("GAME_ID", 160))
+BASE_URL = os.environ.get("BASE_URL", "https://games.drw.com")
 API_URL = f"{BASE_URL}/api/games/trading-simulator/{GAME_ID}"
 
 

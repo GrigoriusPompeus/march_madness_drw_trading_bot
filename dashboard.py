@@ -5,19 +5,22 @@ Auto-refreshes every 10 seconds. Click column headers to sort.
 """
 
 import asyncio
+import os
 import re
 import tkinter as tk
 from tkinter import ttk
 import threading
 import time
 import aiohttp
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from model import compute_fair_values, TEAM_RATINGS, SYMBOL_TO_TEAM, TEAM_TO_SYMBOL, update_symbol_mapping
 
-# Copy these from bot.py
-GAME_ID = 160
-TOKEN = "REDACTED_DRW_TOKEN"
-BASE_URL = "https://games.drw.com"
+GAME_ID = int(os.environ.get("GAME_ID", 160))
+TOKEN = os.environ.get("DRW_TOKEN", "YOUR_TOKEN_HERE")
+BASE_URL = os.environ.get("BASE_URL", "https://games.drw.com")
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 REFRESH_INTERVAL = 10  # seconds

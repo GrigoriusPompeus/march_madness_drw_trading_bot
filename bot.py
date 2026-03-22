@@ -27,6 +27,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 import aiohttp
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from trading_client import Client, Fill, OpenOrder, Order, OrderBook, Trade, create_session
 from model import (
@@ -48,9 +51,9 @@ from odds_api import OddsManager, blend_fair_values
 
 
 # ===== CONFIGURATION =====
-GAME_ID = 160
-TOKEN = "REDACTED_DRW_TOKEN"
-BASE_URL = "https://games.drw.com"
+GAME_ID = int(os.environ.get("GAME_ID", 160))
+TOKEN = os.environ.get("DRW_TOKEN", "YOUR_TOKEN_HERE")
+BASE_URL = os.environ.get("BASE_URL", "https://games.drw.com")
 
 # Trading parameters
 MIN_EDGE = 1.5              # Minimum edge in points to trade (contract prices 0-64)
