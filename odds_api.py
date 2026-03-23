@@ -38,10 +38,10 @@ KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 # ── Polling intervals ────────────────────────────────────────────────────────
-ODDS_API_PREGAME_INTERVAL = 900     # 15 min pre-game
-ODDS_API_LIVE_INTERVAL = 600       # 10 min during live games
-KALSHI_REST_INTERVAL = 120         # 2 min REST fallback if WS fails
-CHAMPIONSHIP_ODDS_INTERVAL = 3600  # 1 hour for futures
+ODDS_API_PREGAME_INTERVAL = 600     # 10 min pre-game (costs credits, keep conservative)
+ODDS_API_LIVE_INTERVAL = 300       # 5 min during live games (costs credits)
+KALSHI_REST_INTERVAL = 10          # 10s REST — Kalshi allows 20 req/s, we use ~0.1 req/s
+CHAMPIONSHIP_ODDS_INTERVAL = 1800  # 30 min for futures (costs credits)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -423,12 +423,37 @@ class KalshiClient:
         # Parsed data
         self.game_winner_probs: Dict[str, float] = {}   # model_team -> P(win current game)
         self.advancement_probs: Dict[str, Dict[str, float]] = {}  # model_team -> {round: prob}
+        # Circuit breaker
+        self._consecutive_failures: int = 0
+        self._backoff_until: float = 0.0
+
+    def _check_backoff(self) -> bool:
+        if self._backoff_until > 0 and time.time() < self._backoff_until:
+            return True
+        return False
+
+    def _record_failure(self, context: str, status: int = 0) -> None:
+        self._consecutive_failures += 1
+        if status in (429, 403, 451):
+            backoff = min(API_BACKOFF_BASE * 4, API_BACKOFF_MAX)
+            self._backoff_until = time.time() + backoff
+            log.warning(f"Kalshi {context}: HTTP {status} — backing off {backoff}s")
+        elif self._consecutive_failures >= API_BACKOFF_THRESHOLD:
+            backoff = min(API_BACKOFF_BASE * (2 ** (self._consecutive_failures - API_BACKOFF_THRESHOLD)), API_BACKOFF_MAX)
+            self._backoff_until = time.time() + backoff
+            log.warning(f"Kalshi {context}: {self._consecutive_failures} failures — backing off {backoff}s")
+
+    def _record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._backoff_until = 0.0
 
     async def discover_ncaa_markets(self) -> List[Dict]:
         """
         Discover NCAA tournament markets on Kalshi.
         Searches for basketball/tournament related markets.
         """
+        if self._check_backoff():
+            return []
         all_markets = []
         cursor = None
 
@@ -445,6 +470,9 @@ class KalshiClient:
                 params = {"series_ticker": series_guess, "status": "open", "limit": 200}
                 try:
                     async with self.session.get(url, params=params) as resp:
+                        if resp.status in (429, 403, 451):
+                            self._record_failure("discovery", resp.status)
+                            return all_markets
                         if resp.status == 200:
                             data = await resp.json()
                             markets = data.get("markets", [])
@@ -460,6 +488,9 @@ class KalshiClient:
                 params = {"status": "open", "limit": 200}
                 try:
                     async with self.session.get(url, params=params) as resp:
+                        if resp.status in (429, 403, 451):
+                            self._record_failure("event discovery", resp.status)
+                            return all_markets
                         if resp.status == 200:
                             data = await resp.json()
                             events = data.get("events", [])
@@ -474,6 +505,9 @@ class KalshiClient:
                                     mkt_url = f"{KALSHI_API_BASE}/markets"
                                     mkt_params = {"event_ticker": event_ticker, "status": "open", "limit": 200}
                                     async with self.session.get(mkt_url, params=mkt_params) as mkt_resp:
+                                        if mkt_resp.status in (429, 403, 451):
+                                            self._record_failure("market fetch", mkt_resp.status)
+                                            return all_markets
                                         if mkt_resp.status == 200:
                                             mkt_data = await mkt_resp.json()
                                             markets = mkt_data.get("markets", [])
@@ -482,7 +516,11 @@ class KalshiClient:
                 except Exception as e:
                     log.warning(f"Kalshi event discovery failed: {e}")
 
+            if all_markets:
+                self._record_success()
+
         except Exception as e:
+            self._record_failure("discovery")
             log.error(f"Kalshi market discovery failed: {e}")
 
         # Parse markets and build team mapping
@@ -641,6 +679,8 @@ class KalshiClient:
 
     async def fetch_rest_prices(self) -> None:
         """Fallback: fetch prices via REST if WebSocket is down."""
+        if self._check_backoff():
+            return
         if not self.team_markets:
             return
 
@@ -658,10 +698,15 @@ class KalshiClient:
             params = {"tickers": ",".join(batch), "limit": 200}
             try:
                 async with self.session.get(url, params=params) as resp:
+                    if resp.status in (429, 403, 451):
+                        self._record_failure("REST fetch", resp.status)
+                        return
                     if resp.status == 200:
                         data = await resp.json()
                         self._parse_markets(data.get("markets", []))
+                        self._record_success()
             except Exception as e:
+                self._record_failure("REST fetch")
                 log.warning(f"Kalshi REST fetch failed: {e}")
 
     async def stop(self) -> None:
@@ -672,6 +717,205 @@ class KalshiClient:
                 await self._ws_task
             except asyncio.CancelledError:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Polymarket Client
+# ═══════════════════════════════════════════════════════════════════════════════
+
+POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
+POLYMARKET_CLOB_URL = "https://clob.polymarket.com"
+POLYMARKET_REFRESH_INTERVAL = 10  # 10s — Polymarket allows 150 req/s on CLOB /price
+
+# Circuit breaker: after N consecutive failures, back off exponentially
+API_BACKOFF_THRESHOLD = 3         # consecutive failures before backing off
+API_BACKOFF_BASE = 60             # base backoff seconds (doubles each time)
+API_BACKOFF_MAX = 3600            # max backoff = 1 hour
+
+class PolymarketClient:
+    """Client for Polymarket prediction market data (public, no auth)."""
+
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
+        self.championship_probs: Dict[str, float] = {}
+        self.token_ids: Dict[str, str] = {}       # model_team -> clob token id
+        self.last_fetch: float = 0.0
+        self._consecutive_failures: int = 0
+        self._backoff_until: float = 0.0
+
+    def _check_backoff(self) -> bool:
+        """Returns True if we should skip due to backoff. Resets on success."""
+        if self._backoff_until > 0 and time.time() < self._backoff_until:
+            return True
+        return False
+
+    def _record_failure(self, context: str, status: int = 0) -> None:
+        """Record a failure and apply exponential backoff if threshold reached."""
+        self._consecutive_failures += 1
+        if status in (429, 403, 451):
+            # Rate-limited or banned — immediate long backoff
+            backoff = min(API_BACKOFF_BASE * 4, API_BACKOFF_MAX)
+            self._backoff_until = time.time() + backoff
+            log.warning(f"Polymarket {context}: HTTP {status} — backing off {backoff}s")
+        elif self._consecutive_failures >= API_BACKOFF_THRESHOLD:
+            backoff = min(API_BACKOFF_BASE * (2 ** (self._consecutive_failures - API_BACKOFF_THRESHOLD)), API_BACKOFF_MAX)
+            self._backoff_until = time.time() + backoff
+            log.warning(f"Polymarket {context}: {self._consecutive_failures} consecutive failures — backing off {backoff}s")
+
+    def _record_success(self) -> None:
+        """Reset failure counter on success."""
+        self._consecutive_failures = 0
+        self._backoff_until = 0.0
+
+    async def discover_ncaa_markets(self) -> None:
+        """Search Polymarket for NCAA tournament championship markets."""
+        if self._check_backoff():
+            return
+        try:
+            url = f"{POLYMARKET_GAMMA_URL}/markets"
+            params = {
+                "active": "true",
+                "closed": "false",
+                "limit": 100,
+                "order": "volume",
+                "ascending": "false",
+            }
+            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status in (429, 403, 451):
+                    self._record_failure("discovery", resp.status)
+                    return
+                if resp.status != 200:
+                    log.warning(f"Polymarket discovery returned {resp.status}")
+                    self._record_failure("discovery", resp.status)
+                    return
+                markets = await resp.json()
+
+            # Also try explicit search
+            search_url = f"{POLYMARKET_GAMMA_URL}/public-search"
+            for query in ["NCAA tournament winner", "March Madness winner"]:
+                try:
+                    async with self.session.get(search_url, params={"q": query}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            # Search returns markets under different keys
+                            for key in ["markets", "data", "results"]:
+                                if key in data and isinstance(data[key], list):
+                                    markets.extend(data[key])
+                except Exception:
+                    continue
+
+            self._parse_markets(markets)
+            self._record_success()
+
+        except Exception as e:
+            self._record_failure("discovery")
+            log.warning(f"Polymarket discovery failed: {e}")
+
+    def _parse_markets(self, markets) -> None:
+        """Parse Polymarket markets and extract NCAA team probabilities."""
+        import re
+        from model import TEAM_RATINGS
+
+        for market in markets:
+            question = (market.get("question", "") + " " +
+                       market.get("description", "") + " " +
+                       market.get("groupItemTitle", "")).lower()
+
+            # Only care about NCAA/basketball/tournament markets
+            if not any(kw in question for kw in ["ncaa", "march madness", "tournament", "college basketball"]):
+                continue
+
+            # Extract token IDs for price fetching
+            clob_token_ids = market.get("clobTokenIds", [])
+            outcomes = market.get("outcomes", [])
+            outcomePrices = market.get("outcomePrices", [])
+
+            # Try to match team names
+            for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
+                if re.search(r'\b' + re.escape(team.lower()) + r'\b', question):
+                    # Binary market: "Will X win?" -> yes price = prob
+                    if outcomePrices and len(outcomePrices) >= 1:
+                        try:
+                            prob = float(outcomePrices[0])
+                            if 0.0 < prob < 1.0:
+                                self.championship_probs[team] = prob
+                                if clob_token_ids:
+                                    self.token_ids[team] = clob_token_ids[0]
+                                log.info(f"Polymarket: {team} = {prob:.1%} ({market.get('question', '')[:60]})")
+                        except (ValueError, IndexError):
+                            pass
+                    break
+
+            # Multi-outcome market (e.g., "Who will win?")
+            if outcomes and len(outcomes) > 2 and outcomePrices:
+                for i, outcome_name in enumerate(outcomes):
+                    if i >= len(outcomePrices):
+                        break
+                    resolved = resolve_team_name(str(outcome_name))
+                    if resolved:
+                        try:
+                            prob = float(outcomePrices[i])
+                            if 0.0 < prob < 1.0:
+                                self.championship_probs[resolved] = prob
+                                if i < len(clob_token_ids):
+                                    self.token_ids[resolved] = clob_token_ids[i]
+                                log.info(f"Polymarket: {resolved} = {prob:.1%}")
+                        except (ValueError, IndexError):
+                            pass
+
+        if self.championship_probs:
+            top5 = sorted(self.championship_probs.items(), key=lambda x: x[1], reverse=True)[:5]
+            log.info(f"Polymarket top 5: {[(t, f'{p:.1%}') for t, p in top5]}")
+
+    async def refresh_prices(self) -> bool:
+        """Refresh prices via CLOB midpoint API. Returns True if updated."""
+        if self._check_backoff():
+            return False
+
+        now = time.time()
+        if now - self.last_fetch < POLYMARKET_REFRESH_INTERVAL:
+            return False
+
+        if not self.token_ids:
+            # Re-discover if we have no tokens
+            await self.discover_ncaa_markets()
+            self.last_fetch = now
+            return bool(self.championship_probs)
+
+        updated = False
+        fetch_failures = 0
+        # Batch fetch midpoints
+        for team, token_id in list(self.token_ids.items()):
+            try:
+                url = f"{POLYMARKET_CLOB_URL}/midpoint"
+                params = {"token_id": token_id}
+                async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status in (429, 403, 451):
+                        self._record_failure("price refresh", resp.status)
+                        return updated  # stop immediately on rate limit
+                    if resp.status == 200:
+                        data = await resp.json()
+                        mid = data.get("mid")
+                        if mid is not None:
+                            prob = float(mid)
+                            if 0.0 < prob < 1.0:
+                                old = self.championship_probs.get(team)
+                                self.championship_probs[team] = prob
+                                if old is not None and abs(prob - old) > 0.02:
+                                    log.info(f"Polymarket: {team} {old:.1%} -> {prob:.1%}")
+                                updated = True
+                    else:
+                        fetch_failures += 1
+            except Exception:
+                fetch_failures += 1
+                continue
+
+        self.last_fetch = now
+        if updated:
+            self._record_success()
+        elif fetch_failures > 0:
+            self._record_failure("price refresh batch")
+        return updated
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -688,6 +932,7 @@ class OddsManager:
         self.session = session
         self.odds_api = TheOddsAPIClient(session)
         self.kalshi = KalshiClient(session)
+        self.polymarket = PolymarketClient(session)
         self.last_odds_fetch: float = 0.0
         self.last_championship_fetch: float = 0.0
         self.last_kalshi_rest_fetch: float = 0.0
@@ -744,6 +989,15 @@ class OddsManager:
         except Exception as e:
             log.warning(f"OddsManager: Kalshi init failed (non-critical): {e}")
 
+        # Discover Polymarket NCAA markets
+        try:
+            await self.polymarket.discover_ncaa_markets()
+            if self.polymarket.championship_probs:
+                log.info(f"OddsManager: found Polymarket data for {len(self.polymarket.championship_probs)} teams")
+                self._update_championship_probs()
+        except Exception as e:
+            log.warning(f"OddsManager: Polymarket init failed (non-critical): {e}")
+
         # Calibrate ratings from collected data
         self._calibrate_ratings()
 
@@ -785,12 +1039,30 @@ class OddsManager:
                     updated = True
                 self.last_championship_fetch = now
 
-        # Kalshi REST fallback (if WebSocket is down)
-        if not self.kalshi.ws_connected and now - self.last_kalshi_rest_fetch > KALSHI_REST_INTERVAL:
-            await self.kalshi.fetch_rest_prices()
-            self._update_championship_probs()
-            self.last_kalshi_rest_fetch = now
-            updated = True
+        # Kalshi REST + Polymarket in parallel
+        parallel_tasks = []
+        do_kalshi = (not self.kalshi.ws_connected and
+                     now - self.last_kalshi_rest_fetch > KALSHI_REST_INTERVAL)
+        if do_kalshi:
+            parallel_tasks.append(self.kalshi.fetch_rest_prices())
+        parallel_tasks.append(self.polymarket.refresh_prices())
+
+        if parallel_tasks:
+            results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+            if do_kalshi:
+                kalshi_result = results[0]
+                poly_result = results[1] if len(results) > 1 else None
+                if not isinstance(kalshi_result, Exception):
+                    self.last_kalshi_rest_fetch = now
+                    updated = True
+            else:
+                poly_result = results[0]
+
+            if poly_result is True:
+                updated = True
+
+            if updated:
+                self._update_championship_probs()
 
         return updated
 
@@ -799,22 +1071,28 @@ class OddsManager:
         self.matchup_overrides = dict(self.odds_api.matchup_probs)
 
     def _update_championship_probs(self) -> None:
-        """Blend championship probabilities from Odds API + Kalshi."""
-        probs = {}
+        """Blend championship probabilities from Odds API + Kalshi + Polymarket."""
+        # Collect all sources per team, then average
+        team_sources: Dict[str, List[float]] = {}
 
-        # Start with Odds API championship data
+        # Odds API bookmaker data
         for team, prob in self.odds_api.championship_probs.items():
-            probs[team] = prob
+            team_sources.setdefault(team, []).append(prob)
 
-        # Blend in Kalshi data (if available)
+        # Kalshi prediction market data
         for team, rounds in self.kalshi.advancement_probs.items():
             kalshi_champ = rounds.get("champion")
             if kalshi_champ is not None:
-                if team in probs:
-                    # Average bookmaker and prediction market
-                    probs[team] = (probs[team] + kalshi_champ) / 2.0
-                else:
-                    probs[team] = kalshi_champ
+                team_sources.setdefault(team, []).append(kalshi_champ)
+
+        # Polymarket prediction market data
+        for team, prob in self.polymarket.championship_probs.items():
+            team_sources.setdefault(team, []).append(prob)
+
+        # Average across all available sources
+        probs = {}
+        for team, source_probs in team_sources.items():
+            probs[team] = sum(source_probs) / len(source_probs)
 
         self.championship_probs = probs
 
@@ -900,6 +1178,7 @@ class OddsManager:
             "championship_probs": len(self.championship_probs),
             "kalshi_ws_connected": self.kalshi.ws_connected,
             "kalshi_markets": sum(len(v) for v in self.kalshi.team_markets.values()),
+            "polymarket_teams": len(self.polymarket.championship_probs),
             "adjusted_teams": len(self.adjusted_ratings),
         }
 

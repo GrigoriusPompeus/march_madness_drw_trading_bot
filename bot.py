@@ -56,7 +56,7 @@ TOKEN = os.environ.get("DRW_TOKEN", "YOUR_TOKEN_HERE")
 BASE_URL = os.environ.get("BASE_URL", "https://games.drw.com")
 
 # Trading parameters
-MIN_EDGE = 1.5              # Minimum edge in points to trade (contract prices 0-64)
+MIN_EDGE = 1.0              # Minimum edge in points to trade (contract prices 0-64)
 MAX_POSITION = 80           # Max contracts per team (exchange limit is usually 100, leaving buffer)
 KELLY_FRACTION = 0.15       # Fractional Kelly multiplier (conservative sizing based on edge)
 MAX_ORDER_QTY = 10          # Max contracts per single order execution
@@ -64,16 +64,17 @@ SPREAD_LIMIT = 4.0          # Don't trade if spread > this
 MIN_PRICE = 0.5             # Don't trade contracts below this price
 MAX_PRICE = 63.5            # Don't trade contracts above this price
 PNL_FLOOR = -500000         # If Game P&L drops below this, only risk-reducing orders allowed
-RECOMPUTE_INTERVAL = 30     # Recompute fair values every N seconds (no live games)
-RECOMPUTE_LIVE = 15         # Recompute interval during live games
+RECOMPUTE_INTERVAL = 10     # Recompute fair values every N seconds — matches API poll rate
+RECOMPUTE_LIVE = 10         # Recompute interval during live games
 ESPN_LIVE_INTERVAL = 10     # ESPN live scores check interval (seconds)
 ESPN_ELIM_INTERVAL = 60     # ESPN eliminations check interval (seconds)
 API_FAIL_THRESHOLD = 3      # Consecutive ESPN failures before pausing trading
-ORDER_COOLDOWN = 5.0        # Min seconds between orders on same symbol
+ORDER_COOLDOWN = 3.0        # Min seconds between orders on same symbol
 WARMUP_SECONDS = 150        # Warmup period (2.5 min) before first trade — allows APIs to settle
+FV_CANCEL_THRESHOLD = 0.5   # Only cancel orders if FV moved more than this on recompute
 
 # Avellaneda-Stoikov / wash trade parameters
-RISK_AVERSION_GAMMA = 0.05    # Avellaneda-Stoikov inventory penalty
+RISK_AVERSION_GAMMA = 0.03    # Avellaneda-Stoikov inventory penalty
 WASH_TRADE_SPREAD = 0.5       # Spread threshold for wash trade detection
 WASH_TRADE_FV_DIST = 2.0      # Min FV distance to flag wash trading
 
@@ -150,6 +151,7 @@ class SymbolState:
     buy_orders: int = 0
     sell_orders: int = 0
     skewed_fv: float = 0.0
+    last_order_fv: float = 0.0  # FV when last orders were placed (for smart cancel)
 
 
 class MadnessBot(Client):
@@ -581,6 +583,7 @@ class MadnessBot(Client):
 
         # --- Refresh external odds periodically ---
         has_live = bool(getattr(self, 'live_games_map', {}))
+        odds_updated = False
         if getattr(self, 'odds_manager', None):
             try:
                 odds_updated = await self.odds_manager.refresh(has_live_games=has_live)
@@ -591,6 +594,8 @@ class MadnessBot(Client):
                     if self.odds_manager.adjusted_ratings:
                         set_adjusted_ratings(self.odds_manager.adjusted_ratings)
                     log.info("External odds refreshed and pushed to model")
+                    # Force immediate recompute when odds change
+                    self.last_recompute = 0
             except Exception as e:
                 log.debug(f"Odds refresh failed (non-critical): {e}")
 
@@ -615,13 +620,23 @@ class MadnessBot(Client):
                 team = self.matched_symbols.get(symbol)
                 if team:
                     state.fair_value = self.fair_values.get(team, 0.0)
-            # Cancel ALL outstanding limit orders after FV recompute
-            # to prevent stale orders from being picked off at old prices
+            # Smart cancel: only cancel orders for symbols whose FV moved significantly
             try:
                 open_orders = await self.get_open_orders()
                 if open_orders:
-                    await self.cancel_orders(list(open_orders.keys()))
-                    log.info(f"Cancelled {len(open_orders)} stale orders after FV recompute")
+                    stale_order_ids = []
+                    for oid, o in open_orders.items():
+                        sym = o.display_symbol
+                        state = self.symbol_states.get(sym)
+                        if state and state.last_order_fv > 0:
+                            if abs(state.fair_value - state.last_order_fv) > FV_CANCEL_THRESHOLD:
+                                stale_order_ids.append(oid)
+                        else:
+                            # No tracked FV for this order — cancel to be safe
+                            stale_order_ids.append(oid)
+                    if stale_order_ids:
+                        await self.cancel_orders(stale_order_ids)
+                        log.info(f"Cancelled {len(stale_order_ids)} stale orders after FV recompute (kept {len(open_orders) - len(stale_order_ids)})")
             except Exception as e:
                 log.warning(f"Failed to cancel stale orders: {e}")
 
@@ -732,7 +747,7 @@ class MadnessBot(Client):
             p = min(max(fair_value / 64.0, 0.0), 1.0)
             N = time_rem / 120.0  # discrete evaluation blocks remaining
             if N > 0:
-                option_value = 0.39 * math.pow(N, 0.42) * (1.0 + 16.12 * p * (1.0 - p))
+                option_value = 0.55 * 0.39 * math.pow(N, 0.42) * (1.0 + 16.12 * p * (1.0 - p))
             else:
                 option_value = 0.0
         else:
@@ -769,6 +784,7 @@ class MadnessBot(Client):
                         try:
                             order = await self.send_order(symbol, ask, qty, "LIMIT")
                             state.last_order_time = time.time()
+                            state.last_order_fv = fair_value
                             self.total_trades += 1
                             # Order accepted — clear any stale block for this direction
                             self._pos_limit_blocked.pop((symbol, "buy"), None)
@@ -809,6 +825,7 @@ class MadnessBot(Client):
                         try:
                             order = await self.send_order(symbol, bid, -qty, "LIMIT")
                             state.last_order_time = time.time()
+                            state.last_order_fv = fair_value
                             self.total_trades += 1
                             # Order accepted — clear any stale block for this direction
                             self._pos_limit_blocked.pop((symbol, "sell"), None)
@@ -1063,7 +1080,8 @@ async def print_status(bot: MadnessBot) -> None:
             status = bot.odds_manager.get_status()
             odds_info = (f" | OddsAPI credits={status['odds_api_credits']} | "
                         f"Matchups={status['matchup_overrides']} | "
-                        f"Kalshi={'WS' if status['kalshi_ws_connected'] else 'REST'}")
+                        f"Kalshi={'WS' if status['kalshi_ws_connected'] else 'REST'} | "
+                        f"Polymarket={status.get('polymarket_teams', 0)} teams")
         log.info(
             f"STATUS: Cash={bot.cash:.0f} | Positions={pos_count} | "
             f"PositionValue~{pos_value:.0f} | Trades={bot.total_trades} | "
