@@ -45,11 +45,15 @@ For each team contract, the bot evaluates whether to buy, sell, or hold:
 - **BUY** when `skewed_FV - best_ask > required_edge` (market underprices the team)
 - **SELL/SHORT** when `best_bid - skewed_FV > required_edge` (market overprices the team)
 
-**Avellaneda-Stoikov inventory skewing**: The fair value is adjusted based on current position:
+**Direction-aware Avellaneda-Stoikov inventory skewing**: The fair value is adjusted based on current position, but the penalty depends on whether the position **agrees** with the model's directional view:
 ```
-skewed_FV = fair_value - (position * gamma)    # gamma = 0.05
+skewed_FV = fair_value - (position * gamma)
 ```
-If we're long 60 contracts, the skewed FV drops by 3 points — making us more eager to sell and less eager to buy more. This naturally caps position sizes and reduces risk without hard limits.
+- **Aligned position** (long underpriced / short overpriced): `gamma = 0.005` — minimal pressure to unwind profitable positions
+- **Misaligned position** (long overpriced / short underpriced): `gamma = 0.03` — full pressure to reduce losing positions
+- **Live game losing protection**: Zero gamma for shorts on teams losing by 5+ with <10 min remaining (don't cover shorts on teams about to be eliminated)
+
+This prevents the bot from covering profitable positions too aggressively while still unwinding positions that disagree with the model.
 
 **Option Value (OV)** — only active during live games:
 ```
@@ -178,6 +182,10 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 - **DRW Web UI** — `https://games.drw.com/games/trading-simulator/160`
 
 ---
+
+## Known Issues Fixed (v6 — March 24, 2026)
+
+**Inventory skew covering profitable positions** — The flat Avellaneda-Stoikov gamma (0.03) applied identical inventory pressure regardless of whether the position agreed with the model. This caused the bot to aggressively cover shorts on teams the model correctly identified as overpriced (e.g., buying back 30 Tennessee at $7.01 when FV was $5.66, losing $210) and sell longs on teams still appreciating (e.g., selling Houston at $15.78 when it went to $18.25). Fixed by: direction-aware gamma — aligned positions (long underpriced / short overpriced) use `gamma=0.005` (6x less pressure), misaligned positions keep `gamma=0.03`. Added extra protection: zero gamma for shorts on teams losing by 5+ in live games with <10 minutes remaining.
 
 ## Known Issues Fixed (v5 — March 20, 2026)
 

@@ -363,8 +363,9 @@ class TestBotParameters(unittest.TestCase):
         self.assertEqual(MIN_EDGE, 1.0)
 
     def test_risk_aversion_gamma(self):
-        from bot import RISK_AVERSION_GAMMA
-        self.assertEqual(RISK_AVERSION_GAMMA, 0.03)
+        from bot import GAMMA_ALIGNED, GAMMA_MISALIGNED
+        self.assertEqual(GAMMA_ALIGNED, 0.005)
+        self.assertEqual(GAMMA_MISALIGNED, 0.03)
 
     def test_order_cooldown(self):
         from bot import ORDER_COOLDOWN

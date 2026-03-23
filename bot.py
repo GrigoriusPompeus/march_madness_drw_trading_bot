@@ -74,7 +74,8 @@ WARMUP_SECONDS = 150        # Warmup period (2.5 min) before first trade — all
 FV_CANCEL_THRESHOLD = 0.5   # Only cancel orders if FV moved more than this on recompute
 
 # Avellaneda-Stoikov / wash trade parameters
-RISK_AVERSION_GAMMA = 0.03    # Avellaneda-Stoikov inventory penalty
+GAMMA_ALIGNED = 0.005         # Minimal skew when position agrees with model direction
+GAMMA_MISALIGNED = 0.03       # Full skew when position disagrees with model direction
 WASH_TRADE_SPREAD = 0.5       # Spread threshold for wash trade detection
 WASH_TRADE_FV_DIST = 2.0      # Min FV distance to flag wash trading
 
@@ -736,8 +737,36 @@ class MadnessBot(Client):
         # Current position in this symbol
         position = self.positions.get(symbol, 0)
 
-        # --- Avellaneda-Stoikov: penalize FV based on inventory ---
-        inventory_penalty = position * RISK_AVERSION_GAMMA
+        # --- Avellaneda-Stoikov: direction-aware inventory skew ---
+        # Only apply strong inventory pressure when position DISAGREES with model.
+        # When position agrees (long underpriced / short overpriced), use minimal skew.
+        if best_bid > 0 and best_ask < 64:
+            market_mid = (best_bid + best_ask) / 2.0
+        elif best_bid > 0:
+            market_mid = best_bid
+        elif best_ask < 64:
+            market_mid = best_ask
+        else:
+            market_mid = fair_value  # no real market data, fall back to FV
+        position_aligned = (
+            (position > 0 and fair_value > market_mid) or
+            (position < 0 and fair_value < market_mid)
+        )
+
+        if position == 0:
+            gamma = GAMMA_MISALIGNED
+        elif position_aligned:
+            gamma = GAMMA_ALIGNED
+            # Extra protection: zero skew for shorts on teams losing in live games
+            # (don't cover shorts on teams about to be eliminated)
+            if (position < 0 and is_live_game
+                    and live_games.get(team_name, {}).get('score_diff', 0) < -5
+                    and time_rem < 600):
+                gamma = 0.0
+        else:
+            gamma = GAMMA_MISALIGNED
+
+        inventory_penalty = position * gamma
         skewed_fv = fair_value - inventory_penalty
         state.skewed_fv = skewed_fv
 
