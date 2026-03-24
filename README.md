@@ -98,13 +98,18 @@ The bot also posts passive **limit orders** near fair value:
 **The Odds API** (bookmaker consensus):
 - Fetches devigged moneylines from 15+ US bookmakers (DraftKings, FanDuel, Caesars, etc.)
 - Championship/outright winner futures for all tournament teams
-- Polling: every **10 min** during live games, **15 min** pre-game, **1 hour** for futures
-- Budget: 500 free credits/month (~2 credits per startup, ~15 per game day)
+- Polling: every **15 min** during live games, **30 min** pre-game, **30 min** for futures (conserving credits since Kalshi is primary)
+- Budget: 500 free credits/month (~2 credits per startup)
 
-**Kalshi** (prediction market):
-- Streams real-time tournament advancement prices via **public WebSocket** (free, unlimited, no auth)
-- Game winner contracts, Final Four, Elite Eight, championship probabilities
-- Falls back to REST polling every 2 min if WebSocket disconnects
+**Kalshi** (prediction market — primary live odds source):
+- REST polling every **10 seconds** for real-time tournament advancement prices (free, unlimited, no auth)
+- Series: `KXMARMAD` (championship), `KXMARMADROUND` (Final Four, Elite Eight, Championship Game)
+- 15 teams tracked with championship, Final Four, and Elite Eight probabilities
+- Team name resolution handles Kalshi abbreviations (e.g., "Michigan St." → "Michigan State") via `_team_pattern()` which correctly handles word boundaries with trailing periods
+
+**Polymarket** (prediction market — currently disabled):
+- ISP DNS blocks all Polymarket domains (resolves to sinkhole `202.136.99.183` instead of Cloudflare)
+- Code is intact but commented out — re-enable by switching DNS to `8.8.8.8` or using a VPN
 
 ---
 
@@ -114,7 +119,7 @@ The bot also posts passive **limit orders** near fair value:
 |------|---------|
 | `bot.py` | Main trading bot — connects to DRW exchange, runs trading loop |
 | `model.py` | Monte Carlo engine — team ratings, bracket sim, fair values, live win probability |
-| `odds_api.py` | External odds integration — The Odds API client, Kalshi WebSocket, rating calibration, FV blending |
+| `odds_api.py` | External odds integration — The Odds API client, Kalshi REST client, rating calibration, FV blending |
 | `live_data.py` | ESPN API integration — live scores, eliminations, team name mapping |
 | `trading_client.py` | DRW exchange client — WebSocket connection, order management |
 | `backtester.py` | Simple backtester replaying market_data.csv |
@@ -132,7 +137,7 @@ The bot also posts passive **limit orders** near fair value:
 ## Startup Warmup
 
 On launch, the bot runs a **2.5-minute warmup period** before executing any trades. During warmup:
-- All API feeds are active (ESPN scores, The Odds API, Kalshi WebSocket)
+- All API feeds are active (ESPN scores, The Odds API, Kalshi REST)
 - Fair values are recomputed with fresh data
 - Eliminations are detected
 - **No orders are placed** until warmup completes
@@ -182,6 +187,18 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 - **DRW Web UI** — `https://games.drw.com/games/trading-simulator/160`
 
 ---
+
+## Known Issues Fixed (v8 — March 24, 2026)
+
+**Kalshi integration broken — wrong series tickers + team name collisions**:
+- Discovery searched for non-existent series (`KXCBB`, `KXNCAA`, etc.) instead of the actual Kalshi tickers (`KXMARMAD`, `KXMARMADROUND`, `KXMARMADREGION`). Found 0 markets; now finds 60+ across 15 teams.
+- Kalshi returns dollar values as strings (e.g., `"0.0200"`) but parser tried arithmetic on them directly → `TypeError`. Added float conversion.
+- "Michigan St." matched to "Michigan" (not "Michigan State") because `\b` word boundary fails after `.` (period is not a word character). Same issue for Iowa St., Ohio St., Utah St., etc. Fixed with `_team_pattern()` helper that uses lookahead `(?=\s|[^a-zA-Z0-9]|$)` for names ending in non-alphanumeric characters. Added Kalshi abbreviation mappings to `ODDS_API_TO_MODEL`.
+- Kalshi WebSocket requires auth (401) — disabled WS, using REST polling every 10s instead.
+
+**Polymarket unreachable — ISP DNS block**: All Polymarket domains (`gamma-api.polymarket.com`, `clob.polymarket.com`) resolve to sinkhole IP `202.136.99.183` via ISP DNS hijacking instead of real Cloudflare IPs (`104.18.34.205`). Confirmed by querying Google DNS (`8.8.8.8`) which returns correct IPs. Polymarket client disabled to eliminate timeout spam in logs.
+
+**Odds API credits conserved**: Switched to new API key. Increased polling intervals (10→30 min pregame, 5→15 min live) since Kalshi is now the primary real-time odds source. 500 credits should last through the tournament.
 
 ## Known Issues Fixed (v7 — March 24, 2026)
 

@@ -38,8 +38,8 @@ KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 # ── Polling intervals ────────────────────────────────────────────────────────
-ODDS_API_PREGAME_INTERVAL = 600     # 10 min pre-game (costs credits, keep conservative)
-ODDS_API_LIVE_INTERVAL = 300       # 5 min during live games (costs credits)
+ODDS_API_PREGAME_INTERVAL = 1800    # 30 min pre-game (Kalshi is primary now, conserve credits)
+ODDS_API_LIVE_INTERVAL = 900       # 15 min during live games (Kalshi is primary now)
 KALSHI_REST_INTERVAL = 10          # 10s REST — Kalshi allows 20 req/s, we use ~0.1 req/s
 CHAMPIONSHIP_ODDS_INTERVAL = 1800  # 30 min for futures (costs credits)
 
@@ -176,29 +176,57 @@ ODDS_API_TO_MODEL = {
     "Prairie View A&M Panthers": "Prairie View A&M",
     "Howard Bison": "Howard",
     "UMBC Retrievers": "UMBC",
+    # Kalshi-style abbreviated names (e.g. "Michigan St." instead of "Michigan State")
+    "Michigan St.": "Michigan State",
+    "Iowa St.": "Iowa State",
+    "Ohio St.": "Ohio State",
+    "Utah St.": "Utah State",
+    "North Dakota St.": "North Dakota State",
+    "Tennessee St.": "Tennessee State",
+    "Kennesaw St.": "Kennesaw State",
+    "Wright St.": "Wright State",
+    "NC St.": "NC State",
+    "St. Mary's": "Saint Mary's",
+    "Ole Miss": "Mississippi",
+    "UNC": "North Carolina",
 }
+
+
+def _team_pattern(name: str) -> str:
+    """Build a regex pattern for a team name with proper word boundaries.
+
+    Handles names ending in '.' (like 'St.') where \\b doesn't work,
+    by requiring a non-word char or end-of-string after the name instead.
+    """
+    import re
+    pat = r'\b' + re.escape(name)
+    if name[-1:].isalnum():
+        pat += r'\b'
+    else:
+        # e.g. "St." — require whitespace, punctuation, or end-of-string after
+        pat += r'(?=\s|[^a-zA-Z0-9]|$)'
+    return pat
 
 
 def resolve_team_name(api_name: str) -> Optional[str]:
     """Resolve an Odds API / Kalshi team name to our model name."""
+    import re
     # Exact match
     if api_name in ODDS_API_TO_MODEL:
         return ODDS_API_TO_MODEL[api_name]
     # Partial match - only check if a known key appears IN the input (not vice versa)
     # to avoid "Michigan" matching "Michigan State Spartans".
-    # If the input is shorter than all keys, step 3 (TEAM_RATINGS regex) handles it.
-    import re
+    # Sort by key length descending so "Michigan St." is checked before "Michigan".
     for api, model in sorted(ODDS_API_TO_MODEL.items(), key=lambda x: len(x[0]), reverse=True):
-        if re.search(r'\b' + re.escape(api) + r'\b', api_name):
+        if re.search(_team_pattern(api), api_name):
             return model
     # Try matching against model names directly - sort by length descending so
     # "Michigan State" is checked before "Michigan", etc.
-    import re
     from model import TEAM_RATINGS
     for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
         if team.lower() == api_name.lower():
             return team
-        if re.search(r'\b' + re.escape(team.lower()) + r'\b', api_name.lower()):
+        if re.search(_team_pattern(team.lower()), api_name.lower()):
             return team
     return None
 
@@ -465,7 +493,7 @@ class KalshiClient:
         try:
             # First, try to find the series ticker for NCAA tournament
             # Try common patterns
-            for series_guess in ["KXCBB", "KXNCAA", "KXMM", "CBB", "NCAA", "MARCHMAD"]:
+            for series_guess in ["KXMARMAD", "KXMARMADROUND", "KXMARMADREGION", "KXCBB", "KXNCAA", "KXMM"]:
                 url = f"{KALSHI_API_BASE}/markets"
                 params = {"series_ticker": series_guess, "status": "open", "limit": 200}
                 try:
@@ -497,7 +525,7 @@ class KalshiClient:
                             ncaa_events = [
                                 e for e in events
                                 if any(kw in (e.get("title", "") + e.get("category", "")).lower()
-                                       for kw in ["ncaa", "march madness", "tournament", "cbb", "college basketball"])
+                                       for kw in ["ncaa", "march madness", "tournament", "cbb", "college basketball", "basketball champion", "final four"])
                             ]
                             for event in ncaa_events:
                                 event_ticker = event.get("event_ticker", "")
@@ -536,44 +564,51 @@ class KalshiClient:
             yes_ask = market.get("yes_ask_dollars")
             last_price = market.get("last_price_dollars")
 
-            # Try to extract team name from title
-            # Titles like "Will Duke win the NCAA Tournament?" or "Duke to reach Final Four"
-            import re
-            from model import TEAM_RATINGS
-            for team in sorted(TEAM_RATINGS.keys(), key=len, reverse=True):
-                if re.search(r'\b' + re.escape(team.lower()) + r'\b', title.lower()):
-                    if team not in self.team_markets:
-                        self.team_markets[team] = []
-                    self.team_markets[team].append(ticker)
+            # Kalshi returns dollar values as strings — convert to float
+            try:
+                yes_bid = float(yes_bid) if yes_bid is not None else None
+                yes_ask = float(yes_ask) if yes_ask is not None else None
+                last_price = float(last_price) if last_price is not None else None
+            except (ValueError, TypeError):
+                continue
 
-                    # Use mid price as probability, fall back to last_price
-                    prob = None
-                    if yes_bid is not None and yes_ask is not None:
-                        # Fields are *_dollars (0.00-1.00 range), mid = probability
-                        prob = (yes_bid + yes_ask) / 2.0
-                    elif last_price is not None:
-                        prob = last_price  # already in dollars = probability
+            # Extract team name from title using resolve_team_name
+            # Titles like "Will Duke win the NCAA Tournament?" or "Michigan St. to reach Final Four"
+            team = resolve_team_name(title)
+            if team is None:
+                continue
 
-                    if prob is not None:
-                        self.market_prices[ticker] = prob
+            if team not in self.team_markets:
+                self.team_markets[team] = []
+            self.team_markets[team].append(ticker)
 
-                        # Categorize by round
-                        title_lower = title.lower()
-                        if "champion" in title_lower or ("win" in title_lower and "tournament" in title_lower):
-                            if team not in self.advancement_probs:
-                                self.advancement_probs[team] = {}
-                            self.advancement_probs[team]["champion"] = prob
-                        elif "final four" in title_lower:
-                            if team not in self.advancement_probs:
-                                self.advancement_probs[team] = {}
-                            self.advancement_probs[team]["final_four"] = prob
-                        elif "elite eight" in title_lower or "elite 8" in title_lower:
-                            if team not in self.advancement_probs:
-                                self.advancement_probs[team] = {}
-                            self.advancement_probs[team]["elite_eight"] = prob
+            # Use mid price as probability, fall back to last_price
+            prob = None
+            if yes_bid is not None and yes_ask is not None:
+                # Fields are *_dollars (0.00-1.00 range), mid = probability
+                prob = (yes_bid + yes_ask) / 2.0
+            elif last_price is not None:
+                prob = last_price  # already in dollars = probability
 
-                        log.info(f"Kalshi: {team} -> {ticker} = {prob:.1%} ({title.strip()[:60]})")
-                    break
+            if prob is not None:
+                self.market_prices[ticker] = prob
+
+                # Categorize by round
+                title_lower = title.lower()
+                if "champion" in title_lower or ("win" in title_lower and "tournament" in title_lower):
+                    if team not in self.advancement_probs:
+                        self.advancement_probs[team] = {}
+                    self.advancement_probs[team]["champion"] = prob
+                elif "final four" in title_lower:
+                    if team not in self.advancement_probs:
+                        self.advancement_probs[team] = {}
+                    self.advancement_probs[team]["final_four"] = prob
+                elif "elite eight" in title_lower or "elite 8" in title_lower:
+                    if team not in self.advancement_probs:
+                        self.advancement_probs[team] = {}
+                    self.advancement_probs[team]["elite_eight"] = prob
+
+                log.info(f"Kalshi: {team} -> {ticker} = {prob:.1%} ({title.strip()[:60]})")
 
     async def start_websocket(self) -> None:
         """Connect to Kalshi WebSocket for real-time price updates."""
@@ -644,10 +679,13 @@ class KalshiClient:
 
                 if ticker:
                     prob = None
-                    if yes_bid is not None and yes_ask is not None:
-                        prob = (yes_bid + yes_ask) / 200.0
-                    elif last_price is not None:
-                        prob = last_price / 100.0
+                    try:
+                        if yes_bid is not None and yes_ask is not None:
+                            prob = (float(yes_bid) + float(yes_ask)) / 200.0
+                        elif last_price is not None:
+                            prob = float(last_price) / 100.0
+                    except (ValueError, TypeError):
+                        pass
 
                     if prob is not None:
                         old = self.market_prices.get(ticker)
@@ -932,7 +970,7 @@ class OddsManager:
         self.session = session
         self.odds_api = TheOddsAPIClient(session)
         self.kalshi = KalshiClient(session)
-        self.polymarket = PolymarketClient(session)
+        # self.polymarket = PolymarketClient(session)  # disabled — ISP DNS blocks Polymarket
         self.last_odds_fetch: float = 0.0
         self.last_championship_fetch: float = 0.0
         self.last_kalshi_rest_fetch: float = 0.0
@@ -982,21 +1020,15 @@ class OddsManager:
             await self.kalshi.discover_ncaa_markets()
             if self.kalshi.team_markets:
                 log.info(f"OddsManager: found Kalshi markets for {len(self.kalshi.team_markets)} teams")
-                await self.kalshi.start_websocket()
+                # WS requires auth — use REST polling instead (KALSHI_REST_INTERVAL)
                 self._update_championship_probs()
             else:
                 log.info("OddsManager: no Kalshi NCAA markets found (may not be available)")
         except Exception as e:
             log.warning(f"OddsManager: Kalshi init failed (non-critical): {e}")
 
-        # Discover Polymarket NCAA markets
-        try:
-            await self.polymarket.discover_ncaa_markets()
-            if self.polymarket.championship_probs:
-                log.info(f"OddsManager: found Polymarket data for {len(self.polymarket.championship_probs)} teams")
-                self._update_championship_probs()
-        except Exception as e:
-            log.warning(f"OddsManager: Polymarket init failed (non-critical): {e}")
+        # Polymarket disabled — ISP DNS blocks all Polymarket domains
+        # Re-enable if DNS is switched to 8.8.8.8 or a VPN is used
 
         # Calibrate ratings from collected data
         self._calibrate_ratings()
@@ -1039,30 +1071,18 @@ class OddsManager:
                     updated = True
                 self.last_championship_fetch = now
 
-        # Kalshi REST + Polymarket in parallel
-        parallel_tasks = []
+        # Kalshi REST polling (WS requires auth, so we use REST)
         do_kalshi = (not self.kalshi.ws_connected and
                      now - self.last_kalshi_rest_fetch > KALSHI_REST_INTERVAL)
         if do_kalshi:
-            parallel_tasks.append(self.kalshi.fetch_rest_prices())
-        parallel_tasks.append(self.polymarket.refresh_prices())
-
-        if parallel_tasks:
-            results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
-            if do_kalshi:
-                kalshi_result = results[0]
-                poly_result = results[1] if len(results) > 1 else None
-                if not isinstance(kalshi_result, Exception):
+            try:
+                result = await self.kalshi.fetch_rest_prices()
+                if not isinstance(result, Exception):
                     self.last_kalshi_rest_fetch = now
                     updated = True
-            else:
-                poly_result = results[0]
-
-            if poly_result is True:
-                updated = True
-
-            if updated:
-                self._update_championship_probs()
+                    self._update_championship_probs()
+            except Exception:
+                pass
 
         return updated
 
@@ -1085,9 +1105,7 @@ class OddsManager:
             if kalshi_champ is not None:
                 team_sources.setdefault(team, []).append(kalshi_champ)
 
-        # Polymarket prediction market data
-        for team, prob in self.polymarket.championship_probs.items():
-            team_sources.setdefault(team, []).append(prob)
+        # Polymarket disabled — ISP DNS block
 
         # Average across all available sources
         probs = {}
@@ -1178,7 +1196,7 @@ class OddsManager:
             "championship_probs": len(self.championship_probs),
             "kalshi_ws_connected": self.kalshi.ws_connected,
             "kalshi_markets": sum(len(v) for v in self.kalshi.team_markets.values()),
-            "polymarket_teams": len(self.polymarket.championship_probs),
+            "polymarket_teams": 0,  # disabled
             "adjusted_teams": len(self.adjusted_ratings),
         }
 
