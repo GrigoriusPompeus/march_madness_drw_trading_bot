@@ -373,8 +373,8 @@ class TestBotParameters(unittest.TestCase):
 
     def test_recompute_interval(self):
         from bot import RECOMPUTE_INTERVAL, RECOMPUTE_LIVE
-        self.assertEqual(RECOMPUTE_INTERVAL, 15)
-        self.assertEqual(RECOMPUTE_LIVE, 15)
+        self.assertEqual(RECOMPUTE_INTERVAL, 10)
+        self.assertEqual(RECOMPUTE_LIVE, 10)
 
     def test_fv_cancel_threshold(self):
         from bot import FV_CANCEL_THRESHOLD

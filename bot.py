@@ -753,6 +753,8 @@ class MadnessBot(Client):
             (position < 0 and fair_value < market_mid)
         )
 
+        is_live_game = (live_games and team_name in live_games and time_rem < 2400.0)
+
         if position == 0:
             gamma = GAMMA_MISALIGNED
         elif position_aligned:
@@ -771,7 +773,6 @@ class MadnessBot(Client):
         state.skewed_fv = skewed_fv
 
         # Enhanced OV: only during live games (pre-game FV already captures uncertainty via MC)
-        is_live_game = (live_games and team_name in live_games and time_rem < 2400.0)
         if is_live_game:
             p = min(max(fair_value / 64.0, 0.0), 1.0)
             N = time_rem / 120.0  # discrete evaluation blocks remaining

@@ -183,6 +183,10 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 
 ---
 
+## Known Issues Fixed (v7 — March 24, 2026)
+
+**`is_live_game` used before assignment** — The `is_live_game` variable was referenced on line 762 (inside the inventory skew gamma logic) but not defined until line 774. This caused an `UnboundLocalError` on every trading cycle, completely halting all trading. The bot was stuck in an error loop from ~08:44 onward, unable to execute any trades during the Sweet 16. Fixed by moving the `is_live_game` assignment above its first use.
+
 ## Known Issues Fixed (v6 — March 24, 2026)
 
 **Inventory skew covering profitable positions** — The flat Avellaneda-Stoikov gamma (0.03) applied identical inventory pressure regardless of whether the position agreed with the model. This caused the bot to aggressively cover shorts on teams the model correctly identified as overpriced (e.g., buying back 30 Tennessee at $7.01 when FV was $5.66, losing $210) and sell longs on teams still appreciating (e.g., selling Houston at $15.78 when it went to $18.25). Fixed by: direction-aware gamma — aligned positions (long underpriced / short overpriced) use `gamma=0.005` (6x less pressure), misaligned positions keep `gamma=0.03`. Added extra protection: zero gamma for shorts on teams losing by 5+ in live games with <10 minutes remaining.
@@ -239,3 +243,10 @@ Stop-Process -Name "pythonw", "python" -Force -ErrorAction SilentlyContinue
 - Top winner: Michigan (+$916 realized, ~$1,000 unrealized) — bought heavily at $6.75–7.55 vs model FV of $21+
 - Other winners: Iowa State (+$385), Nebraska (+$130), Purdue (+$100), Houston (+$85)
 - Avg edge per contract: $2.39 | Trades per hour: 38
+
+### Day 1–5 Cumulative (March 19–24)
+- 2,056 trades, 4,864 contracts traded (2,832 bought, 2,032 sold)
+- Exchange-reported Market P&L: **+$2,953**
+- Heavily net short eliminated teams — large shorts on UCLA (-100), Texas A&M (-100), TCU (-89), Virginia (-80), Michigan St (-70) all profitable
+- Key longs still alive in Sweet 16: Arizona (+84), UConn (+80), Duke (+52), Houston (+22), Iowa St (+19)
+- Bot was down ~5 hours on March 24 due to `is_live_game` bug (v7 fix)
